@@ -1,0 +1,64 @@
+# 将此文件复制为 providers.yaml 并填写 API 配置。
+# API Key 必须通过环境变量设置 — 切勿在此文件中写入密钥。
+#
+# 支持的槽位：image（图像）、video（视频）、voice（语音，可选）
+
+image:
+  base_url: "https://api.example.com"
+  endpoint: "/v1/images/generations"
+  method: POST
+  auth_env_var: IMAGE_API_KEY
+  auth_header: "Authorization"
+  auth_prefix: "Bearer "
+  # JSON 请求体模板。占位符：{{prompt}}、{{reference_url}}、{{width}}、{{height}}
+  request_template:
+    prompt: "{{prompt}}"
+    size: "{{width}}x{{height}}"
+    n: 1
+  # 从响应 JSON 中提取图像 URL 或 base64 的点路径
+  response_image_path: "data.0.url"
+  # 若响应返回 base64 而非 URL，设为 "base64"
+  response_format: url
+
+video:
+  base_url: "https://api.example.com"
+  endpoint: "/v1/videos/generations"
+  method: POST
+  auth_env_var: VIDEO_API_KEY
+  auth_header: "Authorization"
+  auth_prefix: "Bearer "
+  request_template:
+    prompt: "{{prompt}}"
+    duration: "{{duration}}"
+    aspect_ratio: "{{aspect_ratio}}"
+    reference_images: "{{reference_images}}"
+  response_video_path: "data.0.url"
+  response_format: url
+  # 异步视频 API 的轮询配置（可选）
+  poll:
+    enabled: false
+    endpoint: "/v1/videos/{{task_id}}"
+    status_path: "status"
+    ready_status: "completed"
+    video_path: "output.url"
+    interval_sec: 5
+    max_attempts: 60
+
+voice:
+  base_url: "https://api.example.com"
+  endpoint: "/v1/audio/speech"
+  method: POST
+  auth_env_var: VOICE_API_KEY
+  auth_header: "Authorization"
+  auth_prefix: "Bearer "
+  request_template:
+    input: "{{text}}"
+    voice: "{{voice_id}}"
+    model: "tts-1"
+  response_audio_path: null
+  response_format: binary
+
+# Mock 模式，用于本地测试（不发起真实 API 调用）
+mock:
+  enabled: false
+  # 启用后，脚本写入占位 PNG/MP3/WAV 文件，而非调用 API
