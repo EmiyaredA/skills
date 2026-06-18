@@ -1,89 +1,42 @@
-#!/usr/bin/env python3
-"""Initialize a video project directory with state.json and folders."""
+"""初始化短剧项目：创建目录结构与 state.json。
 
-from __future__ import annotations
-
+用法：
+  python init_project.py --project ./my-drama --title "深夜便利店" --ratio 9:16
+"""
 import argparse
 import json
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+import os
+
+import project_utils as pu
 
 
-def default_state(title: str = "") -> dict:
-    return {
-        "project_id": str(uuid.uuid4()),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "brief": {
-            "title": title,
-            "type": "",
-            "style": "",
-            "aspect_ratio": "16:9",
-            "duration_target_sec": 10,
-            "mood": "",
-            "audience": "",
-            "story_summary": "",
-        },
-        "characters": [],
-        "scenes": [],
-        "storyboard": {"beats": []},
-        "episodes": [],
-        "current_stage": "brief",
-        "gates": {
-            "brief_approved": False,
-            "characters_approved": False,
-            "scenes_approved": False,
-            "storyboard_approved": False,
-            "voice_approved": False,
-        },
-    }
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project", required=True, help="项目目录")
+    ap.add_argument("--title", default="", help="作品标题")
+    ap.add_argument("--ratio", default="9:16", choices=["16:9", "9:16", "4:3", "3:4", "1:1"])
+    ap.add_argument("--style", default="", help="整体视觉风格，如『写实电影感』")
+    ap.add_argument("--config", default=None, help="可选：一个配置 JSON（预设），应用到 config；一般不用，配置在应用「设置」里改")
+    args = ap.parse_args()
 
+    pu.ensure_dirs(args.project)
 
-def init_project(project_dir: Path, title: str = "", force: bool = False) -> Path:
-    project_dir = project_dir.resolve()
-    state_path = project_dir / "state.json"
-
-    if state_path.exists() and not force:
-        raise FileExistsError(
-            f"Project already exists at {project_dir}. Use --force to reinitialize."
-        )
-
-    for subdir in ("assets", "output", "docs"):
-        (project_dir / subdir).mkdir(parents=True, exist_ok=True)
-
-    state = default_state(title=title)
-    with state_path.open("w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-
-    brief_template = project_dir / "docs" / "brief.md"
-    if not brief_template.exists():
-        brief_template.write_text(
-            "# Video Brief\n\nFill in project requirements during Stage 1.\n",
-            encoding="utf-8",
-        )
-
-    return state_path
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Initialize a video-creator project")
-    parser.add_argument(
-        "--project",
-        type=Path,
-        default=Path("./video-project"),
-        help="Project directory (default: ./video-project)",
-    )
-    parser.add_argument("--title", default="", help="Optional project title")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite existing state.json",
-    )
-    args = parser.parse_args()
-
-    state_path = init_project(args.project, title=args.title, force=args.force)
-    print(f"Initialized project at {args.project.resolve()}")
-    print(f"State file: {state_path}")
+    path = pu.state_path(args.project)
+    if os.path.exists(path):
+        print(f"已存在 {path}，跳过初始化。")
+        return
+    state = pu.default_state(args.title)
+    state["config"]["ratio"] = args.ratio
+    state["config"]["style"] = args.style
+    if args.config:
+        with open(args.config, encoding="utf-8") as f:
+            pu.apply_config(state, json.load(f))
+        print(f"已应用配置：{args.config}")
+    pu.log(state, "项目初始化")
+    pu.save_state(args.project, state)
+    print(f"已初始化项目：{args.project}")
+    print(f"  state: {path}")
+    print(f"  画幅: {state['config']['ratio']}  风格: {state['config']['style'] or '(未设置)'}")
 
 
 if __name__ == "__main__":

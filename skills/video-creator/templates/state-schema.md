@@ -1,114 +1,70 @@
-# state.json 结构说明
+# state.json 结构
 
-项目状态文件是对话轮次间的唯一事实来源。AI 和脚本读写 `./video-project/state.json`。
+`state.json` 是各轮对话之间的唯一事实来源，由 `project_utils.py` 读写。
 
-## 顶层字段
+## 顶层
+| 字段 | 说明 |
+|------|------|
+| `project_id` | uuid |
+| `title` | 作品标题 |
+| `phase` | `align`（对齐需求）/ `mode`（确定模式）/ `generate`（生成） |
+| `config` | 全局配置（见下） |
+| `story` | 剧情：`logline`、`summary`、`beats[]` |
+| `characters[]` | 角色 |
+| `scenes[]` | 场景 |
+| `shots[]` | 分镜机位 |
+| `clips[]` | 视频片段（样片/成片） |
+| `history[]` | 操作日志 |
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `project_id` | string (uuid) | 项目唯一标识 |
-| `brief` | object | 已确认的视频简报 |
-| `characters` | array | 角色定义 |
-| `scenes` | array | 场景定义 |
-| `storyboard` | object | 含图像的分镜节拍 |
-| `episodes` | array | 已生成视频历史 |
-| `current_stage` | string | 当前工作流阶段 |
-| `gates` | object | 批准标志 |
-
-## brief
-
+## config
+默认值见 `project_utils.default_config()`；用户在实时审核页（`serve_review.py`）的「设置」面板里随时改、即时落盘（`/api/config` → `apply_config`）：
 ```json
-{
-  "title": "",
-  "type": "",
-  "style": "",
-  "aspect_ratio": "16:9",
-  "duration_target_sec": 10,
-  "mood": "",
-  "audience": "",
-  "story_summary": ""
-}
+{ "ratio": "9:16", "style": "写实电影感",
+  "image": { "model_final": "senseaudio-image-2.0-260319",
+             "model_sample": "senseaudio-image-1.0-260319", "use_async": false },
+  "video": { "model": "doubao-seedance-2-0-260128",
+             "resolution_sample": "480p", "resolution_final": "1080p",
+             "duration_default": 5, "generate_audio": true, "watermark": true },
+  "audio": { "tts_model": "senseaudio-tts-1.5-260319", "voice_id": "",
+             "format": "mp3", "speed": 1.0 } }
 ```
+API Key **不**存在 config/state 里：走环境变量 `SENSEAUDIO_API_KEY`，或用户在应用 `#config` 填入后写到项目根的 `.sa_key`（不进 git）。
 
 ## characters[]
-
 ```json
-{
-  "id": "char_01",
-  "name": "",
-  "description": "",
-  "views": {
-    "front": "assets/char_01_front.png",
-    "side": "assets/char_01_side.png",
-    "back": "assets/char_01_back.png"
-  },
-  "reference_upload": null,
-  "voice": {
-    "source": "ai_recommended",
-    "path": "",
-    "description": ""
-  },
-  "status": "draft"
-}
+{ "id": "char_01", "name": "林夏", "prompt": "身份锚点描述",
+  "reference": "用户参考图路径(可选)",
+  "three_view": { "front": "assets/characters/char_01_front.png",
+                  "side": "...", "back": "...", "sheet": "(整张三视图，二选一)" },
+  "image": "主用图",
+  "voice": { "source": "tts", "voice_id": "female_0033_b",
+             "sample_text": "...", "sample": "assets/voices/char_01.mp3" },
+  "status": "draft|approved" }
 ```
-
-`status`：`draft` | `approved`
-
-`voice.source`：`ai_recommended` | `user_upload` | `generated`
 
 ## scenes[]
-
 ```json
-{
-  "id": "scene_01",
-  "name": "",
-  "description": "",
-  "image": "assets/scene_01.png",
-  "reference_upload": null,
-  "status": "draft"
-}
+{ "id": "scene_01", "name": "便利店", "prompt": "...",
+  "image": "assets/scenes/scene_01.png", "status": "draft|approved" }
 ```
 
-## storyboard.beats[]
-
+## shots[]（分镜机位）
 ```json
-{
-  "id": "beat_01",
-  "scene_id": "scene_01",
-  "characters": ["char_01"],
-  "action": "",
-  "dialogue": "",
-  "camera": "",
-  "image": "assets/beat_01.png",
-  "status": "draft"
-}
+{ "id": "shot_01", "scene_id": "scene_01", "characters": ["char_01"],
+  "prompt": "中景，林夏推门", "image": "assets/shots/shot_01.png",
+  "status": "draft|approved" }
 ```
 
-## episodes[]
-
+## clips[]（视频片段）
 ```json
-{
-  "episode": 1,
-  "video_path": "output/ep01.mp4",
-  "beats_used": ["beat_01", "beat_02"],
-  "generated_at": "2026-06-08T12:00:00Z"
-}
+{ "id": "clip_01", "kind": "sample|final",
+  "mode": "first_frame|first_last|continue_prev|...",
+  "prompt": "...", "shot_ids": ["shot_01"],
+  "inputs": { "first_frame": "", "last_frame": "", "reference": [],
+              "prev_video": "", "next_video": "", "audio": "" },
+  "resolution": "480p", "duration": 5, "ratio": "9:16",
+  "task_id": "...", "video_url": "...", "local_path": "output/clip_01_sample.mp4",
+  "cost_estimate": 2.5, "status": "draft|generating|done|failed" }
 ```
 
-## current_stage
-
-取值为：`brief`、`characters`、`scenes`、`storyboard`、`voice`、`preflight`、`generating`、`review`、`done`
-
-## gates
-
-```json
-{
-  "brief_approved": false,
-  "characters_approved": false,
-  "scenes_approved": false,
-  "storyboard_approved": false,
-  "voice_approved": false
-}
-```
-
-运行 `generate_video.py` 前，五项均须为 `true`。
+`status`：草稿资产为 `draft`，经用户在审核页确认后置 `approved`。修订时把受影响项设回 `draft`。

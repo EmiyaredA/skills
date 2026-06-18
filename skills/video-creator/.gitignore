@@ -1,3 +1,10 @@
-config/providers.yaml
-test-video-project/
-video-project/
+# 用户项目产物（应建在 skill 目录之外，此处仅作兜底）
+*/state.json
+*/assets/
+*/output/
+*/review/
+__pycache__/
+*.pyc
+.env
+.sa_key
+*/.sa_key
