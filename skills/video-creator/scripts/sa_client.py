@@ -140,6 +140,37 @@ def pick_size(model, ratio):
     return table.get(ratio) or next(iter(table.values()), "1024x1024")
 
 
+def composite_reference(paths, dest, cell_h=512, pad=14, bg=(245, 245, 247)):
+    """把多张参考图横向拼成一张「参考拼贴」，供**单参考图**的图像 API 同时参考多个主体/场景
+    （多角色同框 + 场景一致性）。需要 Pillow；缺失或失败返回 None（调用方回退为单图）。"""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    imgs = []
+    for p in (paths or []):
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception:
+            continue
+        w = max(1, int(im.width * cell_h / max(1, im.height)))
+        imgs.append(im.resize((w, cell_h)))
+    if len(imgs) < 2:
+        return None
+    total_w = sum(i.width for i in imgs) + pad * (len(imgs) + 1)
+    board = Image.new("RGB", (total_w, cell_h + pad * 2), bg)
+    x = pad
+    for im in imgs:
+        board.paste(im, (x, pad))
+        x += im.width + pad
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    try:
+        board.save(dest)
+    except Exception:
+        return None
+    return dest
+
+
 # ---------- 图像 ----------
 
 def image_sync(model, prompt, size=None, reference=None, seed=None):

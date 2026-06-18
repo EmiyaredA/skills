@@ -1,22 +1,16 @@
-"""生成视频片段。支持样片（最省积分）与成片，以及多种生成模式。
+"""生成视频片段。样片（最省积分）/ 成片。
 
-模式由传入的输入自动判定，并写入 state：
-  纯文生视频          只给 --prompt
-  首帧 / 尾帧 / 首尾帧  --first-frame / --last-frame
-  参考图驱动          --reference a.png,b.png
-  承接前置视频        --prev-video <已托管URL>  （或先用 extract_frames.py 取末帧作 --first-frame）
-  续接后置视频        --next-video <已托管URL>  （或取后片首帧作 --last-frame）
-  音频驱动            --audio voice.mp3
+**参考图驱动**：以「分镜图 + 角色设定图」作参考生成镜头内容（不使用首/尾帧——首尾帧与参考素材不能混用）。
+其它可选：
+  纯文生视频    只给 --prompt
+  承接前置视频  --prev-video <已托管URL>
+  续接后置视频  --next-video <已托管URL>
+  音频驱动      --audio voice.mp3
 
-示例（样片，480p 最省）：
+示例（样片，480p 最省；参考分镜图 + 角色）：
   python gen_video.py --project P --id clip_01 --sample \
       --prompt "林夏推开便利店门，回头一笑" \
-      --first-frame assets/shots/shot_01.png --duration 5
-
-示例（成片，1080p）：
-  python gen_video.py --project P --id clip_01 --resolution 1080p \
-      --prompt "..." --first-frame assets/shots/shot_01.png \
-      --last-frame assets/shots/shot_02.png --duration 8
+      --reference assets/shots/shot_01.png --characters char_01 --duration 5
 
   --no-audio 关闭生成音轨。（--mock 仅 selftest 自检用，勿作交付）
 """
@@ -27,17 +21,11 @@ import sa_client as sa
 import project_utils as pu
 
 
-def derive_mode(first, last, refs, prev_v, next_v, audio):
+def derive_mode(refs, prev_v, next_v, audio):
     if prev_v:
         return "continue_prev"
     if next_v:
         return "continue_next"
-    if first and last:
-        return "first_last"
-    if first:
-        return "first_frame"
-    if last:
-        return "last_frame"
     if refs:
         return "reference"
     if audio:
@@ -50,15 +38,13 @@ def main():
     ap.add_argument("--project", required=True)
     ap.add_argument("--id", required=True)
     ap.add_argument("--prompt", required=True)
-    ap.add_argument("--first-frame", default=None)
-    ap.add_argument("--last-frame", default=None)
-    ap.add_argument("--reference", default=None, help="参考图，逗号分隔")
+    ap.add_argument("--reference", default=None, help="参考图（分镜图/角色图…），逗号分隔")
     ap.add_argument("--characters", default=None, help="出场角色 id，逗号分隔；自动注入角色锚点+各角色参考图")
     ap.add_argument("--scene", default=None, help="场景 id；自动把场景图作参考")
     ap.add_argument("--prev-video", default=None, help="承接的前置视频（http(s) URL）")
     ap.add_argument("--next-video", default=None, help="续接的后置视频（http(s) URL）")
     ap.add_argument("--audio", default=None, help="驱动音频（本地路径或URL）")
-    ap.add_argument("--shots", default=None, help="关联的分镜 id，逗号分隔")
+    ap.add_argument("--shots", default=None, help="关联的分镜 id，逗号分隔；自动把分镜图作参考")
     ap.add_argument("--duration", type=int, default=None, help="秒，4-15")
     ap.add_argument("--ratio", default=None)
     ap.add_argument("--model", default=None, help="覆盖项目默认视频模型")
@@ -90,6 +76,13 @@ def main():
     # 出场角色：注入身份锚点到 prompt + 把每个角色的设定图作参考（视频支持多参考图）。
     # 这是防止"角色性别错/衣服对不上/角色消失或重复"的关键。
     char_ids = [c.strip() for c in args.characters.split(",") if c.strip()] if args.characters else []
+    shot_ids = [s.strip() for s in args.shots.split(",") if s.strip()] if args.shots else []
+    # 分镜图作参考（镜头构图/内容的主要依据）——放在最前
+    for sid in shot_ids:
+        img = pu.find(state.get("shots", []), sid)
+        img = img.get("image") if img else None
+        if img and img not in refs:
+            refs.insert(0, img)
     prompt = args.prompt
     if char_ids:
         anchor = pu.character_anchor(state, char_ids)
@@ -100,25 +93,23 @@ def main():
             if img and img not in refs:
                 refs.append(img)
 
-    mode = derive_mode(args.first_frame, args.last_frame, refs,
-                       args.prev_video, args.next_video, args.audio)
+    mode = derive_mode(refs, args.prev_video, args.next_video, args.audio)
     cost = sa.estimate_video(resolution, duration)
     kind = "sample" if args.sample else "final"
     dest = os.path.join(args.project, "output", f"{args.id}_{kind}.mp4")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
     print(f"模式={mode}  画质={resolution}  时长={duration}s  音轨={generate_audio}  参考成本~{cost:.2f}元")
-    if char_ids:
-        print(f"  ↳ 出场角色：{','.join(char_ids)}；已注入身份锚点 + {len(refs)} 张参考图（防角色漂移/消失）")
+    if refs:
+        print(f"  ↳ 参考图 {len(refs)} 张（分镜图+角色设定图）；出场角色：{','.join(char_ids) or '(无)'}（注入身份锚点，防漂移/消失）")
 
     record = {
         "id": args.id, "kind": kind, "mode": mode, "prompt": args.prompt,
         "model": args.model or vcfg.get("model", sa.DEFAULT_VIDEO_MODEL),
         "resolution": resolution, "duration": duration, "ratio": ratio,
-        "shot_ids": args.shots.split(",") if args.shots else [],
+        "shot_ids": shot_ids,
         "characters": char_ids,
-        "inputs": {"first_frame": args.first_frame, "last_frame": args.last_frame,
-                   "reference": refs, "prev_video": args.prev_video,
+        "inputs": {"reference": refs, "prev_video": args.prev_video,
                    "next_video": args.next_video, "audio": args.audio},
         "cost_estimate": round(cost, 2), "status": "generating",
     }
@@ -130,10 +121,14 @@ def main():
                       task_id="mock", video_url="")
         print(f"  ✓ (mock) {dest}")
     else:
+        # 把项目内相对路径解析成绝对路径再传给 API（否则按子进程 CWD 找不到文件）
+        def _abs(p):
+            if not p or p.startswith(("http://", "https://", "data:", "/")):
+                return p
+            return os.path.join(args.project, p)
         content = sa.build_video_content(
-            prompt, first_frame=args.first_frame, last_frame=args.last_frame,
-            reference_images=refs, prev_video=args.prev_video,
-            next_video=args.next_video, audio=args.audio)
+            prompt, reference_images=[_abs(r) for r in refs], prev_video=args.prev_video,
+            next_video=args.next_video, audio=_abs(args.audio))
         task_id = sa.video_create(
             content, duration, resolution, ratio,
             model=args.model or vcfg.get("model", sa.DEFAULT_VIDEO_MODEL),
@@ -151,13 +146,15 @@ def main():
                       local_path=os.path.relpath(dest, args.project))
         print(f"  ✓ {dest}")
 
-    existing = pu.find(state["clips"], args.id)
-    if existing:
-        existing.update(record)
-    else:
-        state["clips"].append(record)
-    pu.log(state, f"生成视频 {args.id}（{kind}/{mode}/{resolution}/{duration}s）")
-    pu.save_state(args.project, state)
+    def _apply(st):
+        items = st.setdefault("clips", [])
+        ex = pu.find(items, args.id)
+        if ex:
+            ex.update(record)
+        else:
+            items.append(record)
+        pu.log(st, f"生成视频 {args.id}（{kind}/{mode}/{resolution}/{duration}s）")
+    pu.update_state(args.project, _apply)   # 并发安全：重载最新 state 再写
     print(f"已更新 state.json（clip={args.id}）")
 
 

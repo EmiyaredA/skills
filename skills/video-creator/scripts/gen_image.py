@@ -106,29 +106,51 @@ def main():
     char_ids = [c.strip() for c in args.characters.split(",")] if args.characters else []
     scene_id = args.scene or args.scene_id
     base_prompt = args.prompt
-    reference = args.reference
+    # --reference 现在可传多张（逗号分隔）：分镜会把"各角色设定图 + 场景图"一并参考
+    refs = [r.strip() for r in args.reference.split(",")] if args.reference else []
     style_note = ""
     if args.type == "character":
-        # 画风基准：新角色参考已有角色/基准图，保持同一画风（如二次元 3D 渲染）。
-        if not reference and args.style_ref:
-            reference = pu.character_image(state, args.style_ref) or args.style_ref
-        if reference:
+        if not refs and args.style_ref:
+            refs = [pu.character_image(state, args.style_ref) or args.style_ref]
+        if refs:
             style_note = "，与参考图保持同一画风（统一渲染风格、同一世界观）"
     if args.type == "shot":
         anchor = pu.character_anchor(state, char_ids)
         if anchor:
             base_prompt = anchor + "镜头：" + args.prompt
-        if not reference:
-            # 图像 API 只接受单张参考图：角色身份优先（锁脸/服装），其次场景
-            reference = (pu.character_image(state, char_ids[0]) if char_ids else None) \
-                or pu.scene_image(state, scene_id)
-    # 本地相对路径统一解析到项目目录下（各类型通用）
-    if reference and not reference.startswith(("http://", "https://", "data:", "/")):
-        reference = os.path.join(args.project, reference)
+        if not refs:
+            # 缺省：出场角色设定图（全部）+ 场景图，供拼贴参考
+            refs = [pu.character_image(state, c) for c in char_ids]
+            refs.append(pu.scene_image(state, scene_id))
+    # 解析到项目目录下的绝对路径，去掉空值/重复
+    seen, abs_refs = set(), []
+    for r in refs:
+        if not r:
+            continue
+        rp = r if r.startswith(("http://", "https://", "data:", "/")) else os.path.join(args.project, r)
+        if rp not in seen:
+            seen.add(rp)
+            abs_refs.append(rp)
+    # 图像 API 只接受单张参考图：多张时（分镜多角色+场景）拼成一张「参考拼贴」一起参考
+    reference = abs_refs[0] if abs_refs else None
+    if args.type == "shot" and len(abs_refs) > 1 and not args.mock:
+        local = [r for r in abs_refs if not r.startswith(("http://", "https://", "data:"))]
+        if len(local) > 1:
+            board = os.path.join(args.project, "assets/refs", f"{args.id}_board.png")
+            if sa.composite_reference(local, board):
+                reference = board
+                base_prompt += ("。【参考图是“出场角色设定图 + 场景图”的横向拼贴，"
+                                "请据此让每个角色的外观/服装/身高比例与各自设定一致、场景与设定一致；"
+                                "输出为完整的单幅镜头画面，不要输出拼贴或分格】")
 
     cost = 0.0
+    # 记录里存「来源参考图」列表（人设/场景的原图），而不是发给 API 的拼贴板——这样卡片能显示用到的每一张
+    def _rel(p):
+        return p if p.startswith(("http://", "https://", "data:")) else os.path.relpath(p, args.project)
+    src_refs = [_rel(r) for r in abs_refs]
     record = {"id": args.id, "name": args.name, "prompt": args.prompt,
-              "reference": reference, "model": model, "status": "draft"}
+              "reference": src_refs[0] if src_refs else None, "references": src_refs,
+              "model": model, "status": "draft"}
     if args.gender:
         record["gender"] = args.gender
 
@@ -171,13 +193,15 @@ def main():
             record["characters"] = char_ids
             print(f"  ↳ 已注入角色锚点：{','.join(char_ids)}；参考图：{reference or '(无)'}")
 
-    existing = pu.find(state[key], args.id)
-    if existing:
-        existing.update(record)
-    else:
-        state[key].append(record)
-    pu.log(state, f"生成 {args.type} 图像 {args.id}（model={model}, ~{cost:.2f}元）")
-    pu.save_state(args.project, state)
+    def _apply(st):
+        items = st.setdefault(key, [])
+        ex = pu.find(items, args.id)
+        if ex:
+            ex.update(record)
+        else:
+            items.append(record)
+        pu.log(st, f"生成 {args.type} 图像 {args.id}（model={model}, ~{cost:.2f}元）")
+    pu.update_state(args.project, _apply)   # 并发安全：重载最新 state 再写，避免并行生成互相覆盖
     print(f"已更新 state.json（{args.type}={args.id}，参考成本 ~{cost:.2f}元）")
 
 

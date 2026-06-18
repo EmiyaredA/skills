@@ -58,9 +58,9 @@ API Key **不**存在 config/state 里：走环境变量 `SENSEAUDIO_API_KEY`，
 ## clips[]（视频片段）
 ```json
 { "id": "clip_01", "kind": "sample|final",
-  "mode": "first_frame|first_last|continue_prev|...",
+  "mode": "reference|text_to_video|continue_prev|continue_next|audio_driven",
   "prompt": "...", "shot_ids": ["shot_01"],
-  "inputs": { "first_frame": "", "last_frame": "", "reference": [],
+  "inputs": { "reference": ["assets/shots/shot_01.png", "assets/characters/char_01.png"],
               "prev_video": "", "next_video": "", "audio": "" },
   "resolution": "480p", "duration": 5, "ratio": "9:16",
   "task_id": "...", "video_url": "...", "local_path": "output/clip_01_sample.mp4",

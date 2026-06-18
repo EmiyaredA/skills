@@ -69,7 +69,7 @@
   "provider_specific": { "generate_audio": true }
 }
 ```
-- `role` ∈ `first_frame | last_frame | reference`
+- `role` ∈ `first_frame | last_frame | reference`。**⚠️ 首/尾帧与 reference 不能混用**（混用返回 400「首尾帧和参考素材不能混用」）。本 skill 统一只用 `reference`（分镜图+角色图），不发首/尾帧。
 - `duration`：4–15 秒
 - `resolution`：`480p | 720p | 1080p`
 - `ratio`：`16:9 | 9:16 | 4:3 | 3:4 | 1:1`

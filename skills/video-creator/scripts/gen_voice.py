@@ -74,10 +74,15 @@ def main():
         with open(dest, "wb") as f:
             f.write(audio)
 
-    char["voice"] = {"source": "tts", "voice_id": voice_id,
-                     "sample_text": args.text, "sample": os.path.relpath(dest, args.project)}
-    pu.log(state, f"为 {args.character} 合成语音（voice_id={voice_id}）")
-    pu.save_state(args.project, state)
+    voice_rec = {"source": "tts", "voice_id": voice_id,
+                 "sample_text": args.text, "sample": os.path.relpath(dest, args.project)}
+
+    def _apply(st):
+        c = pu.find(st.setdefault("characters", []), args.character)
+        if c:
+            c["voice"] = voice_rec
+        pu.log(st, f"为 {args.character} 合成语音（voice_id={voice_id}）")
+    pu.update_state(args.project, _apply)   # 并发安全：重载最新 state 再写
     print(f"  ✓ {dest}")
     print(f"已登记角色 {args.character} 的音色 {voice_id}")
 

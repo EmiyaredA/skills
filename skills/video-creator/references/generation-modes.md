@@ -1,38 +1,40 @@
-# 阶段 2：视频生成模式
+# 阶段 3：视频生成模式
 
-确定本次片段「从什么生成」。模式由传给 `gen_video.py` 的输入决定，并自动写入 `state.clips[].mode`。
+视频**以分镜图（+角色设定图）作参考**生成镜头内容。模式由传给 `gen_video.py` 的输入自动判定，写入 `state.clips[].mode`。
+
+> ⚠️ **不使用首/尾帧**：SenseAudio 视频 API「首尾帧和参考素材不能混用」（混用会 400）。本 skill 统一走**参考图驱动**，
+> 把分镜图、角色设定图都作为 `reference` 传入；需要镜头开场画面就把对应分镜图作参考。
 
 | 模式 | 适用场景 | 传入参数 |
 |------|----------|----------|
-| `text_to_video` | 从零生成，只有文字描述 | `--prompt` |
-| `first_frame` | 指定开场画面 | `--first-frame img.png` |
-| `last_frame` | 指定结尾画面 | `--last-frame img.png` |
-| `first_last` | 同时锁定首尾，中间补全 | `--first-frame a.png --last-frame b.png` |
-| `reference` | 用角色/场景图约束主体与风格 | `--reference c1.png,scene.png` |
-| `continue_prev` | **承接前置视频**（接着已有剧情往后拍） | `--prev-video <URL>` 或抽末帧作 `--first-frame` |
-| `continue_next` | **续接后置视频**（往前补一段衔接到已有片段） | `--next-video <URL>` 或抽首帧作 `--last-frame` |
+| `reference` | **默认**：参考分镜图 + 角色图生成镜头 | `--shots shot_01`（分镜图作参考）`--characters char_01`（角色锚点+图）`--reference a.png,b.png`（额外参考） |
+| `text_to_video` | 从零生成，只有文字描述 | 只给 `--prompt` |
+| `continue_prev` | **承接前置视频**（接着已有剧情往后拍） | `--prev-video <已托管 http(s) URL>` |
+| `continue_next` | **续接后置视频**（往前补一段衔接到已有片段） | `--next-video <已托管 http(s) URL>` |
 | `audio_driven` | 用语音/音乐驱动口型与节奏 | `--audio voice.mp3` |
+
+## 参考图驱动（主路径）
+
+```bash
+# 用分镜图 shot_01 + 出场角色作参考，生成 480p 样片
+python scripts/gen_video.py --project P --id clip_01 --sample \
+    --prompt "林夏推开便利店门，回头一笑；中景，人物约占画面 70%" \
+    --shots shot_01 --characters char_01 --duration 5
+```
+- `--shots`：把对应分镜图作为参考图（镜头构图/内容的主要依据），放在参考列表最前。
+- `--characters`：注入角色身份锚点（防性别/服装漂移）并把各角色设定图一并作参考。
+- `--reference`：再追加任意参考图（逗号分隔）。
+- 以上都作为 `reference` 传给 API，**不混用首/尾帧**。
 
 ## 承接 / 续接已有视频
 
-API 的 `video_url` 只接受**已托管的 http(s) 地址**。处理本地视频有两条路径：
-
-1. **已托管视频**：直接 `--prev-video https://.../prev.mp4`（或 `--next-video`），可同时给 prompt 描述如何延续。
-2. **本地视频**：先抽帧，再以首/尾帧约束（更稳、更省，推荐）：
-   ```bash
-   # 承接前一段：取它的末帧作为新片段的首帧
-   python scripts/extract_frames.py --video prev.mp4 --out PROJECT/assets/refs --which last
-   python scripts/gen_video.py --project PROJECT --id clip_02 \
-       --prompt "延续上一镜，林夏走向柜台" --first-frame PROJECT/assets/refs/prev_last.png
-
-   # 续接后一段：取后片的首帧作为新片段的尾帧
-   python scripts/extract_frames.py --video next.mp4 --out PROJECT/assets/refs --which first
-   python scripts/gen_video.py --project PROJECT --id clip_00 \
-       --prompt "衔接镜头" --last-frame PROJECT/assets/refs/next_first.png
-   ```
-3. **首尾都给**：前段末帧作 `--first-frame`，后段首帧作 `--last-frame`，生成中间过渡，无缝衔接两段。
+API 的 `video_url` 只接受**已托管的 http(s) 地址**：
+- 承接：`--prev-video https://.../prev.mp4` + prompt 描述如何延续。
+- 续接：`--next-video https://.../next.mp4`。
+- 本地视频需先自行上传托管再给 URL（不再用抽帧+首尾帧的方式）。
 
 ## 一致性建议
-- 同一角色出现在多镜：把角色三视图/正面图作为 `--reference` 一并传入。
-- 跨片段连贯：优先用「前段末帧 → 下段首帧」的链式约束，而非纯文生。
+- 同一角色出现在多镜：`--characters` 注入，自动带各角色设定图作参考。
+- 镜头构图沿用分镜图：`--shots` 指定该 clip 对应的分镜。
+- 在 prompt 里写清人物之间、人物与场景/道具的**比例**，并跨镜用同一套措辞。
 - 画幅 `ratio` 在整部短剧内保持一致（竖屏短剧用 `9:16`）。

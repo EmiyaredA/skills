@@ -1,8 +1,14 @@
 """项目状态读写工具。state.json 是各轮对话之间的唯一事实来源。"""
+import contextlib
 import json
 import os
 import uuid
 from datetime import datetime, timezone
+
+try:
+    import fcntl  # POSIX 文件锁，用于并发安全写 state.json
+except ImportError:
+    fcntl = None
 
 
 # ---------- 固定的工作目录结构（单一事实来源） ----------
@@ -153,8 +159,40 @@ def load_state(project):
 
 def save_state(project, state):
     state["updated_at"] = now_iso()
-    with open(state_path(project), "w", encoding="utf-8") as f:
+    path = state_path(project)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)   # 原子替换，避免读到半写文件
+
+
+@contextlib.contextmanager
+def state_lock(project):
+    """跨进程互斥锁（POSIX flock）。并发的 gen_*.py 用它串行化 state.json 的读改写。"""
+    lock_path = state_path(project) + ".lock"
+    f = open(lock_path, "w")
+    try:
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
+def update_state(project, mutate):
+    """并发安全地更新 state：加锁 → 重新载入最新 → mutate(st) → 落盘。
+
+    多个生成进程并行写时必须走这里，否则各自基于过期快照保存会互相覆盖（资产丢失）。
+    """
+    with state_lock(project):
+        st = load_state(project)
+        mutate(st)
+        save_state(project, st)
+        return st
 
 
 def log(state, message):
@@ -181,12 +219,16 @@ def character_anchor(state, char_ids):
         if not c:
             continue
         g = f"，{c['gender']}" if c.get("gender") else ""
+        build = f"，{c['build']}" if c.get("build") else ""   # 身高/体型，如「高挑」「娇小，比男主矮一头」
         desc = c.get("prompt") or c.get("description") or ""
-        parts.append(f"{c.get('name') or cid}（{cid}{g}）：{desc}")
+        parts.append(f"{c.get('name') or cid}（{cid}{g}{build}）：{desc}")
     if not parts:
         return ""
-    return ("【严格保持以下角色一致：性别、发型、瞳色、服装、五官特征必须与设定完全一致，"
-            "不得增减或替换角色】" + "；".join(parts) + "。")
+    anchor = ("【严格保持以下角色一致：性别、发型、瞳色、服装、五官特征、**身高与体型比例**必须与各自设定图完全一致，"
+              "不得增减或替换角色】" + "；".join(parts) + "。")
+    if len(parts) > 1:   # 多角色同框：强调相对比例，避免跨镜忽大忽小
+        anchor += "【多角色同框：各角色的相对身高与体型比例必须符合各自设定，并在所有分镜/镜头间保持一致，不得随画面变化】"
+    return anchor
 
 
 def character_image(state, cid):

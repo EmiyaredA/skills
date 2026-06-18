@@ -1,26 +1,29 @@
 """本地实时审核 + 生成进度服务：左侧分类侧边栏 + 右侧卡片，**先开前端，再边生成边看进度**。
 
 本服务是整套 skill 的**唯一前端**，**活的**：
-- 助手把「生成计划」(plan.json) 交给本服务并**先把网页打开**；服务用后台 worker 池**并行**生成（默认 4 路），
-  每个资产立刻是一张占位卡片，带状态（排队/生成中%/完成/失败）；顶部一条总进度。
+- 助手只**准备**任务（plan.json / POST /api/plan，落为「待生成」草稿）并打开网页；**生成由用户在 UI 点「开始生成」触发**。
+  生成后用后台 worker 池**并行**跑（默认 4 路），每个资产是占位卡片，带状态（待生成/排队/生成中%/完成/失败）+ 顶部总进度。
+- 生成分三阶段、队列按阶段门控：阶段1 人设+场景 → 阶段2 分镜（用人设/场景图作参考）→ 阶段3 视频+语音。
 - 用户在页面上看进度；完成的卡片可立刻改提示词/参考图/模型/设置并「重新生成」，失败的可「重试」；
   点侧边栏「设置」随时改全局配置/Key、即时落盘生效。
-- 用户点「继续 / 重做这一批」→ 服务把结果写入 review/review_result.json 并自动退出
-  → 后台任务结束会重新唤起助手，助手读 state.json + review_result.json 决定下一步。
+- 服务**常驻**（无「继续/重做」提交闭环）。助手续作下一阶段时：读 /api/state 判断阶段 → POST /api/plan 推进。
+  停止：用户点侧边栏「关闭服务」、助手 `--stop`、或 kill serve.pid。
 
 接口：
-  GET  /                 单页应用（侧边栏 + 卡片 + 进度 + 设置面板）
-  GET  /api/state        全量状态：分类、各分类条目、配置、可选模型/画幅/分辨率
+  GET  /                 单页应用（侧边栏[按三阶段分组] + 卡片 + 进度 + 设置面板）
+  GET  /api/state        全量状态：分类、各分类条目、阶段、配置、可选模型/画幅/分辨率
   GET  /api/tasks        生成任务队列与进度（前端轮询）
   GET  /media?path=rel   流式返回项目内的图片/音频/视频（带防越权校验）
   POST /api/config       深合并配置并落盘（实时生效）
+  POST /api/key          保存 API Key 到 .sa_key
   POST /api/decision     保存某条目的「通过/需修改」+ 意见
   POST /api/regenerate   按本条目编辑后的提示词/参考图/模型/设置重新生成（入队）
   POST /api/retry        用原始计划参数重试某失败任务（入队）
+  POST /api/plan         把一批新任务推进运行中的服务（助手续作下一阶段用）
   POST /api/stop         停止：取消所有排队任务（当前任务跑完即停）
-  POST /api/finish       记录「继续/重做」动作 → 写 review_result.json → 关闭服务
+  POST /api/shutdown     关停本地服务
 
-  python serve_review.py --project ./drama [--plan plan.json] [--port 8765] [--no-open]
+  python serve_review.py --project ./drama [--plan plan.json] [--port 8765] [--daemon] [--stop]
 
 plan.json 形如：{"tasks":[
   {"category":"characters","id":"char_01","name":"林夏","prompt":"...","gender":"女","views":"front,side,back","sample":true},
@@ -34,6 +37,7 @@ import base64
 import json
 import mimetypes
 import os
+import signal
 import re
 import subprocess
 import sys
@@ -57,6 +61,14 @@ CATEGORIES = [
     {"key": "voices", "label": "语音配音", "icon": "microphone", "kind": "voice"},
 ]
 EXT_BY_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
+# 生成阶段：阶段1(人设+场景) → 阶段2(分镜，用人设/场景图作参考) → 阶段3(视频/语音)。
+# 队列按阶段门控：上一阶段全部结束前，不启动下一阶段——保证分镜/视频生成时参考图已存在。
+STAGE_OF = {"characters": 1, "scenes": 1, "shots": 2, "clips": 3, "voices": 3}
+STAGES = [
+    {"n": 1, "label": "设定", "cats": ["characters", "scenes"]},
+    {"n": 2, "label": "分镜", "cats": ["shots"]},
+    {"n": 3, "label": "成片", "cats": ["clips", "voices"]},
+]
 # 用户在卡片上可直接改、并覆盖原始计划参数的字段
 EDITABLE = ("prompt", "model", "ratio", "resolution", "duration", "sample", "voice_id", "text")
 
@@ -137,7 +149,8 @@ def build_gen_cmd(project, key, spec):
             if spec.get("scene"):
                 cmd += ["--scene", spec["scene"]]
         if refs:
-            cmd += ["--reference", refs[0]]   # 图像 API 仅接受单张参考图
+            # 分镜传全部参考（gen_image 会把多张拼成一张参考拼贴）；角色/场景只用单张
+            cmd += ["--reference", ",".join(refs) if key == "shots" else refs[0]]
         return cmd
     if key == "clips":
         cmd = [py, os.path.join(HERE, "gen_video.py"), "--project", project,
@@ -154,20 +167,23 @@ def build_gen_cmd(project, key, spec):
             cmd += ["--sample"]
         if spec.get("characters"):
             cmd += ["--characters", spec["characters"]]
-        if spec.get("scene"):
-            cmd += ["--scene", spec["scene"]]
-        if spec.get("first_frame"):
-            cmd += ["--first-frame", spec["first_frame"]]
-        if spec.get("last_frame"):
-            cmd += ["--last-frame", spec["last_frame"]]
+        # 分镜图作参考（不再用首/尾帧——首尾帧与参考素材不能混用）
+        shots = spec.get("shots") or spec.get("shot")
+        if shots:
+            cmd += ["--shots", shots if isinstance(shots, str) else ",".join(shots)]
         if spec.get("prev_video"):
             cmd += ["--prev-video", spec["prev_video"]]
         if spec.get("next_video"):
             cmd += ["--next-video", spec["next_video"]]
         if spec.get("audio"):
             cmd += ["--audio", spec["audio"]]
-        if refs:
-            cmd += ["--reference", ",".join(refs)]
+        # 兼容历史：把 first_frame/last_frame 当作普通参考图
+        rlist = list(refs)
+        for k in ("first_frame", "last_frame"):
+            if spec.get(k) and spec[k] not in rlist:
+                rlist.append(spec[k])
+        if rlist:
+            cmd += ["--reference", ",".join(rlist)]
         return cmd
     if key == "voices":
         cmd = [py, os.path.join(HERE, "gen_voice.py"), "--project", project,
@@ -194,27 +210,55 @@ class GenQueue:
     def _key(self, spec):
         return f"{spec['category']}::{spec['id']}"
 
-    def enqueue(self, spec):
+    @staticmethod
+    def _norm(spec):
+        """容错：把单数 reference 归一成 references 数组（AI 常误写 reference）。"""
+        if not spec.get("references") and spec.get("reference"):
+            r = spec["reference"]
+            spec["references"] = [r] if isinstance(r, str) else list(r)
+        return spec
+
+    def enqueue(self, spec, start=True):
+        """加入任务。start=True 立即排队生成；start=False 仅作为「待生成」草稿（AI 备好、等用户在 UI 点生成）。"""
+        spec = self._norm(dict(spec))
         with self.lock:
             k = self._key(spec)
-            self.specs[k] = dict(spec)
+            self.specs[k] = spec
             self.seq += 1
             t = {"task_id": self.seq, "category": spec["category"], "item_id": spec["id"],
-                 "label": spec.get("name") or spec["id"], "status": "queued",
+                 "label": spec.get("name") or spec["id"], "status": "queued" if start else "draft",
                  "progress": None, "message": "", "cost": est_cost(spec["category"], spec)}
-            # 同一资产若已有结束态任务，移除旧的，避免列表堆积
+            # 同一资产的非运行中旧任务移除（重推/重生成时刷新），避免堆叠
             self.tasks = [x for x in self.tasks
                           if not (x["category"] == spec["category"] and x["item_id"] == spec["id"]
-                                  and x["status"] in ("done", "failed", "canceled"))]
+                                  and x["status"] != "running")]
             self.tasks.append(t)
-        self._ensure_workers()
+        if start:
+            self._ensure_workers()
         return t
+
+    def start_drafts(self, scope):
+        """把「待生成」草稿转入队列开始生成。scope: {all} / {category} / {categories:[...]} / {category,id}。"""
+        n = 0
+        with self.lock:
+            for t in self.tasks:
+                if t["status"] != "draft":
+                    continue
+                if (scope.get("all")
+                        or (scope.get("id") and t["item_id"] == scope.get("id") and t["category"] == scope.get("category"))
+                        or (scope.get("category") and not scope.get("id") and t["category"] == scope["category"])
+                        or (scope.get("categories") and t["category"] in scope["categories"])):
+                    t["status"] = "queued"
+                    n += 1
+        if n:
+            self._ensure_workers()
+        return n
 
     def retry(self, category, iid):
         k = f"{category}::{iid}"
         spec = self.specs.get(k)
         if spec:
-            return self.enqueue(dict(spec))
+            return self.enqueue(dict(spec), start=True)
         return None
 
     def stop(self):
@@ -237,27 +281,75 @@ class GenQueue:
                 self.workers.append(w)
             w.start()
 
+    def _pick_locked(self):
+        """阶段门控取下一个 queued 任务：上一阶段还有 queued/running 时，不放行下一阶段。"""
+        queued = [t for t in self.tasks if t["status"] == "queued"]
+        if not queued:
+            return None
+        for stg in sorted({STAGE_OF.get(t["category"], 1) for t in queued}):
+            earlier_busy = any(STAGE_OF.get(t["category"], 1) < stg and t["status"] in ("queued", "running")
+                               for t in self.tasks)
+            if earlier_busy:
+                continue
+            t = next((t for t in queued if STAGE_OF.get(t["category"], 1) == stg), None)
+            if t:
+                return t
+        return None
+
     def _run(self):
         while True:
             with self.lock:
                 if self._stop:
                     break
-                nxt = next((t for t in self.tasks if t["status"] == "queued"), None)
+                nxt = self._pick_locked()
                 if not nxt:
                     break
                 nxt["status"] = "running"
                 nxt["progress"] = None
                 spec = self.specs[f"{nxt['category']}::{nxt['item_id']}"]
             self._exec(nxt, spec)
+            self._ensure_workers()   # 阶段门控可能此刻放开，补足 worker 跑下一阶段
 
     def _set(self, t, **kw):
         with self.lock:
             t.update(kw)
 
+    def _resolve_refs(self, spec, key):
+        """分镜/视频生成前，自动从已完成的阶段1 结果补全 characters 与参考图（人设图+场景图）。
+
+        这样即使 AI 在计划里忘了写 characters/scene，分镜/视频也会自动拿到角色设定图作参考，
+        并把解析到的参考图回写进 spec —— 卡片上即可见“用了哪些参考图”。
+        """
+        if key not in ("shots", "clips"):
+            return spec
+        try:
+            st = pu.load_state(self.project)
+        except Exception:
+            return spec
+        named = [c.strip() for c in (spec.get("characters") or "").split(",") if c.strip()]
+        # 解析参考图用的角色：AI 指定了就用指定的；没指定则退化到全体角色（仅作视觉参考）
+        ref_ids = named or [c["id"] for c in st.get("characters", [])]
+        refs = list(spec.get("references") or [])
+        for cid in ref_ids:
+            img = pu.character_image(st, cid)
+            if img and img not in refs:
+                refs.append(img)
+        if key == "shots" and spec.get("scene"):
+            simg = pu.scene_image(st, spec["scene"])
+            if simg and simg not in refs:
+                refs.append(simg)
+        with self.lock:
+            if refs:
+                spec["references"] = refs   # 始终给视觉参考（卡片可见、生成可用）
+            # 不自动写 characters：身份锚点只作用于 AI 明确点名的出场角色，
+            # 避免把没点名的全体角色强行"锁进画面"（单人镜头会被塞进多人）
+        return spec
+
     def _exec(self, t, spec):
         if not pu.has_key(self.project):
             self._set(t, status="failed", message="未配置 API Key，无法生成。请在配置阶段填写 Key。")
             return
+        spec = self._resolve_refs(spec, t["category"])   # 自动补全分镜/视频的角色与参考图
         cmd = build_gen_cmd(self.project, t["category"], spec)
         if not cmd:
             self._set(t, status="failed", message=f"未知分类：{t['category']}")
@@ -296,7 +388,7 @@ class GenQueue:
                 d["spec"] = self.specs.get(f"{t['category']}::{t['item_id']}", {})
                 pub.append(d)
         totals = {s: sum(1 for x in pub if x["status"] == s)
-                  for s in ("queued", "running", "done", "failed", "canceled")}
+                  for s in ("queued", "running", "done", "failed", "canceled", "draft")}
         totals["total"] = len(pub)
         return {"tasks": pub, "totals": totals,
                 "generating": totals["queued"] + totals["running"] > 0,
@@ -328,7 +420,7 @@ class ReviewState:
         return {"id": c["id"], "title": c.get("name") or c["id"],
                 "meta": (c.get("gender") or ""), "prompt": c.get("prompt", ""),
                 "model": c.get("model", ""), "ratio": c.get("ratio", "16:9"),
-                "references": _ref_list(c.get("reference")),
+                "references": _ref_list(c.get("references"), c.get("reference")),
                 "media": media, "decision": c.get("review_decision", "通过"),
                 "note": c.get("review_note", ""), "status": c.get("status", "draft")}
 
@@ -338,7 +430,7 @@ class ReviewState:
         return {"id": it["id"], "title": it.get("name") or it["id"],
                 "meta": it.get("scene_id", ""), "prompt": it.get("prompt", ""),
                 "model": it.get("model", ""), "ratio": it.get("ratio", ""),
-                "references": _ref_list(it.get("reference")),
+                "references": _ref_list(it.get("references"), it.get("reference")),
                 "media": media, "decision": it.get("review_decision", "通过"),
                 "note": it.get("review_note", ""), "status": it.get("status", "draft")}
 
@@ -353,7 +445,7 @@ class ReviewState:
                 "prompt": cl.get("prompt", ""), "model": cl.get("model", ""),
                 "resolution": cl.get("resolution", "480p"), "duration": cl.get("duration", 5),
                 "ratio": cl.get("ratio", ""),
-                "references": _ref_list(inp.get("first_frame"), inp.get("last_frame"), inp.get("reference", [])),
+                "references": _ref_list(inp.get("reference", []), inp.get("first_frame"), inp.get("last_frame")),
                 "media": media, "decision": cl.get("review_decision", "通过"),
                 "note": cl.get("review_note", ""), "status": cl.get("status", "draft")}
 
@@ -396,6 +488,7 @@ class ReviewState:
         return {
             "title": state.get("title") or "短剧项目", "phase": state.get("phase", ""),
             "project": self.project, "config": cfg, "categories": cats, "items": items,
+            "stages": STAGES,
             "options": {"image_models": img_models, "video_models": vid_models,
                         "ratios": RATIOS, "resolutions": RESOLUTIONS},
             "has_key": pu.has_key(self.project),
@@ -445,6 +538,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/tasks":
             self._send_json(self.gq.snapshot())
+            return
+        if parsed.path == "/api/files":
+            # 列出工作目录下的图片（供「从工作目录选参考图」用——浏览器无法把上传框默认目录设到项目里）
+            exts = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+            groups = []
+            for key, rel, label, _icon in pu.SUBDIRS:
+                if key in ("voices", "review", "output", "docs"):
+                    continue
+                d = os.path.join(self.project, rel)
+                if not os.path.isdir(d):
+                    continue
+                files = sorted(f for f in os.listdir(d) if f.lower().endswith(exts))
+                if files:
+                    groups.append({"label": label, "files": [os.path.join(rel, f).replace("\\", "/") for f in files]})
+            self._send_json({"groups": groups})
             return
         if parsed.path == "/media":
             q = urllib.parse.parse_qs(parsed.query)
@@ -512,8 +620,25 @@ class Handler(BaseHTTPRequestHandler):
             self.gq.stop()
             self._send_json({"ok": True})
             return
-        if parsed.path == "/api/finish":
-            self._finish(body)
+        if parsed.path == "/api/plan":
+            # AI 只「准备」任务（draft），不自动生成；用户在 UI 点「开始生成」才真正跑。
+            n = 0
+            for spec in (body.get("tasks") or []):
+                if spec.get("category") and spec.get("id"):
+                    self.gq.enqueue(spec, start=False)
+                    n += 1
+            self._send_json({"ok": True, "prepared": n})
+            return
+        if parsed.path == "/api/generate":
+            # 用户在 UI 触发生成：把待生成草稿转入队列。scope: {all}/{category}/{categories}/{category,id}
+            n = self.gq.start_drafts(body or {"all": True})
+            self._send_json({"ok": True, "started": n})
+            return
+        if parsed.path == "/api/shutdown":
+            # 直接关停本地服务（不提交结果）。资产/配置已在工作目录里，安全。
+            self._send_json({"ok": True})
+            if self.server_ref:
+                threading.Thread(target=self.server_ref.shutdown, daemon=True).start()
             return
         self.send_error(404)
 
@@ -546,24 +671,6 @@ class Handler(BaseHTTPRequestHandler):
         t = self.gq.enqueue(base)
         self._send_json({"ok": True, "task": t})
 
-    def _finish(self, body):
-        action = body.get("action") or "继续"
-        state = self.rs.load()
-        result = {"action": action, "phase": state.get("phase", ""),
-                  "summary": {c["key"]: [
-                      {"id": it["id"], "decision": it.get("decision"), "note": it.get("note"),
-                       "status": it.get("status")} for it in self.rs.items(state, c["key"])]
-                      for c in CATEGORIES},
-                  "tasks": self.gq.snapshot()["tasks"]}
-        os.makedirs(pu.subdir(self.project, "review"), exist_ok=True)
-        with open(os.path.join(pu.subdir(self.project, "review"), "review_result.json"), "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        pu.log(state, f"审核页提交：{action}")
-        self.rs.save(state)
-        self._send_json({"ok": True, "action": action})
-        if self.server_ref:
-            threading.Thread(target=self.server_ref.shutdown, daemon=True).start()
-
 
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -590,11 +697,26 @@ nav{display:flex;flex-direction:column;gap:4px}
 .nav-i .ico{font-size:17px;width:20px;text-align:center}
 .nav-i .cnt{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--soft);background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:1px 8px;min-width:24px;justify-content:center}
 .nav-i.active .cnt{color:var(--ink)}
+.nav-i .nl{flex:1}
 .nav-i .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.1s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.nav-stage{display:flex;align-items:center;gap:8px;padding:14px 10px 6px;font-size:11px;color:var(--soft);letter-spacing:.05em;text-transform:uppercase}
+.nav-stage:first-child{padding-top:4px}
+.nav-stage .sn{width:17px;height:17px;border-radius:6px;background:var(--card2);border:1px solid var(--line2);color:var(--mut);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
+.nav-stage.active .sn{background:linear-gradient(180deg,var(--accent),var(--accent2));color:#0a1230;border-color:transparent}
+.nav-stage.done .sn{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok);border-color:transparent}
+.nav-stage .sl{flex:1}.nav-stage.active .sl,.nav-stage.done .sl{color:var(--ink)}
+.nav-stage .okdot{color:var(--ok);font-size:12px}
+.nav-stage .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.1s infinite}
+.stage-tag{font-size:12px;color:var(--mut);background:var(--card2);border:1px solid var(--line2);padding:3px 11px;border-radius:999px}
+.guide{margin:0 0 14px;padding:10px 13px;border-radius:11px;font-size:12.5px;line-height:1.6;color:var(--mut);
+background:color-mix(in srgb,var(--accent) 9%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent)}
+.guide.warn{color:var(--no);background:color-mix(in srgb,var(--no) 10%,transparent);border-color:color-mix(in srgb,var(--no) 35%,transparent)}
+.guide a{color:var(--accent);text-decoration:none;font-weight:600;cursor:pointer}.guide a:hover{text-decoration:underline}
 .side-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:12px}
 .side-btn{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;color:var(--mut);font-size:13.5px;cursor:pointer;border:1px solid var(--line);background:var(--card2);text-decoration:none;transition:.15s}
 .side-btn:hover{color:var(--ink);border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}.side-btn .ico{font-size:16px}
+.side-btn.danger:hover{border-color:var(--no);box-shadow:0 0 0 3px color-mix(in srgb,var(--no) 35%,transparent);color:var(--no)}
 main{flex:1;min-width:0;display:flex;flex-direction:column}
 .top{padding:16px 26px 0;background:color-mix(in srgb,var(--panel) 80%,transparent);backdrop-filter:saturate(150%) blur(10px);-webkit-backdrop-filter:saturate(150%) blur(10px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:6}
 .top-row{display:flex;align-items:center;gap:12px;padding-bottom:14px}
@@ -611,15 +733,17 @@ main{flex:1;min-width:0;display:flex;flex-direction:column}
 .card:hover{transform:translateY(-2px);border-color:var(--line2)}
 .card.running{border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
 .card.queued{opacity:.7;border-style:dashed}
+.card.draft{border-style:dashed;border-color:var(--line2)}
 .card.failed{border-color:var(--no)}
 .card.rev{border-color:var(--no)}
-.ch{display:flex;align-items:center;gap:9px;margin-bottom:12px}
-.ch h3{font-size:16px;margin:0 auto 0 0;font-weight:650}
+.ch{display:flex;align-items:center;gap:8px;margin-bottom:12px;min-width:0}
+.ch h3{font-size:15.5px;margin:0 auto 0 0;font-weight:650;min-width:0;overflow-wrap:anywhere}
 .badge{font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600;letter-spacing:.02em}
 .badge.done{color:#06281c;background:var(--ok)}.badge.running{color:#0a1230;background:var(--accent)}
 .badge.queued{color:var(--mut);background:var(--card2);border:1px solid var(--line2)}
 .badge.failed{color:#3a0f16;background:var(--no)}
-.pill{font-size:11.5px;color:var(--mut);background:var(--card2);border:1px solid var(--line);padding:3px 10px;border-radius:999px}
+.pill{font-size:11.5px;color:var(--mut);background:var(--card2);border:1px solid var(--line);padding:3px 10px;border-radius:999px;display:inline-block;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;flex:none}
+.badge{flex:none}
 .cstat{margin-bottom:11px}
 .cprog{display:flex;align-items:center;gap:8px}.cprog .track{height:7px}.cprog .pp{font-size:11px;color:var(--mut);min-width:34px;text-align:right}
 .cmsg{font-size:11.5px;color:var(--soft);margin-top:7px;line-height:1.5;word-break:break-all;max-height:46px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -642,7 +766,8 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
 .ref{position:relative;width:66px;height:66px;border-radius:11px;overflow:hidden;border:1px solid var(--line2);transition:.15s}.ref:hover{border-color:var(--accent)}
 .ref img{width:100%;height:100%;object-fit:cover;cursor:zoom-in}.ref.removed{opacity:.32;filter:grayscale(1)}
 .ref .rx{position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.62);color:#fff;font-size:11px;line-height:20px;border:0;cursor:pointer;text-align:center;transition:.12s}.ref .rx:hover{background:var(--no)}
-.ref-up{width:66px;height:66px;border-radius:11px;border:1px dashed var(--line2);color:var(--mut);font-size:12px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.15s}.ref-up:hover{color:var(--accent);border-color:var(--accent)}
+.ref-up{width:66px;height:66px;flex:none;border-radius:11px;border:1px dashed var(--line2);color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;transition:.15s}.ref-up:hover{color:var(--accent);border-color:var(--accent)}
+.ref-up .ru-ic{font-size:18px;line-height:1}.ref-up .ru-t{font-size:11px;line-height:1}
 .setbox{background:color-mix(in srgb,var(--bg) 50%,transparent);border:1px solid var(--line);border-radius:13px;padding:12px 13px;margin:13px 0}
 .setbox .sgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.setbox label{font-size:12px;color:var(--mut);display:block}
 .foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:13px;margin-top:6px}
@@ -674,6 +799,16 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
 #lb.show{display:flex}#lb img{max-width:92vw;max-height:82vh;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6)}
 #lb .bar{position:absolute;top:18px;right:18px;display:flex;gap:10px}
 #lb .bar a,#lb .bar button{background:rgba(255,255,255,.13);color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:11px;padding:9px 15px;font-size:14px;text-decoration:none;cursor:pointer;font-weight:600}#lb .bar a:hover,#lb .bar button:hover{background:rgba(255,255,255,.24)}
+#picker{position:fixed;inset:0;z-index:95;background:rgba(6,8,12,.7);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:32px}
+#picker.show{display:flex}
+.picker-box{width:760px;max-width:92vw;max-height:82vh;background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line2);border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.5)}
+.picker-h{display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:1px solid var(--line);font-size:15px;font-weight:650}
+.picker-h button{background:transparent;border:0;color:var(--mut);font-size:18px;cursor:pointer;border-radius:8px;width:30px;height:30px}.picker-h button:hover{background:var(--card2);color:var(--ink)}
+.picker-body{padding:16px 18px;overflow:auto}
+.pg{margin-bottom:16px}.pgl{font-size:12px;color:var(--accent);font-weight:600;margin-bottom:8px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px}
+.pgrid img{width:100%;height:96px;object-fit:cover;border-radius:10px;border:1px solid var(--line2);cursor:pointer;transition:.12s;background:#000}
+.pgrid img:hover{border-color:var(--accent);box-shadow:0 0 0 3px var(--ring);transform:translateY(-2px)}
 </style></head>
 <body>
 <div class="app">
@@ -683,14 +818,15 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
     <div class="side-foot">
       <a class="side-btn" id="wdlink" href="#" target="_blank"><span class="ico">📂</span>打开工作目录</a>
       <div class="side-btn" onclick="openSettings()"><span class="ico">⚙</span>设置（配置）</div>
+      <div class="side-btn danger" onclick="shutdownApp()"><span class="ico">⏻</span>关闭服务</div>
     </div>
   </aside>
   <main>
     <div class="top">
       <div class="top-row">
         <h1 id="cat-title">…</h1><span class="sub" id="cat-sub"></span>
-        <button class="btn" id="btn-go" onclick="finish('继续')">继续</button>
-        <button class="btn ghost" onclick="finish('重做这一批')">重做这一批</button>
+        <button class="btn" id="btn-gen" style="display:none" onclick="generateAll()">▶ 开始生成</button>
+        <span class="stage-tag" id="stage-tag"></span>
       </div>
       <div class="pbar hide" id="pbar">
         <span class="ptext" id="ptext"></span>
@@ -698,6 +834,7 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
         <span class="ptext" id="pcost"></span>
         <button class="btn ghost sm" onclick="stopAll()">全部停止</button>
       </div>
+      <div class="guide" id="guide"></div>
     </div>
     <div class="scroll"><div class="cards" id="cards"></div></div>
   </main>
@@ -712,6 +849,10 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
 <div id="lb" onclick="if(event.target.id==='lb')this.classList.remove('show')">
   <div class="bar"><a id="lbdl" href="#" download>⬇ 下载</a><button onclick="document.getElementById('lb').classList.remove('show')">✕</button></div>
   <img id="lbimg" src="" alt="">
+</div>
+<div id="picker" onclick="if(event.target.id==='picker')closePicker()">
+  <div class="picker-box"><div class="picker-h"><span>从工作目录选参考图</span><button onclick="closePicker()">✕</button></div>
+    <div class="picker-body" id="picker-body"></div></div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -737,12 +878,36 @@ function applyHash(){const h=(location.hash||'').slice(1);
   if(h&&S.categories.some(c=>c.key===h))select(h);}
 window.addEventListener('hashchange',applyHash);
 function catTasks(key){return Object.values(TASK).filter(t=>t.category===key&&(t.status==='running'||t.status==='queued'));}
-function renderNav(){const ICON={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️',microphone:'🎙️'};
-  $('#nav').innerHTML=S.categories.map(c=>{const act=catTasks(c.key).length;
-    return `<div class="nav-i${c.key===CUR?' active':''}" onclick="select('${c.key}')"><span class="ico">${ICON[c.icon]||'•'}</span>${c.label}<span class="cnt">${act?'<span class=dot></span>':''}${c.count}</span></div>`;}).join('');}
-function select(key){CUR=key;const cat=S.categories.find(c=>c.key===key);
-  $('#cat-title').textContent=cat.label;$('#cat-sub').textContent=`${cat.count} 项`;
-  renderNav();renderCards();
+const ICONS={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️',microphone:'🎙️'};
+function stageOfCat(k){const s=(S.stages||[]).find(x=>x.cats.includes(k));return s?s.n:1;}
+function stageState(stg){  // 'active' 有任务在跑 | 'done' 有成果且无在跑 | 'idle' 空
+  const act=Object.values(TASK).some(t=>stg.cats.includes(t.category)&&(t.status==='running'||t.status==='queued'));
+  if(act)return 'active';
+  const cnt=stg.cats.reduce((s,k)=>s+((S.categories.find(c=>c.key===k)||{}).count||0),0);
+  return cnt>0?'done':'idle';}
+function renderNav(){const byKey={};S.categories.forEach(c=>byKey[c.key]=c);
+  let html='';
+  (S.stages||[]).forEach(stg=>{const st=stageState(stg);
+    const mark=st==='active'?'<span class="dot"></span>':st==='done'?'<span class="okdot">✓</span>':'';
+    html+=`<div class="nav-stage ${st}"><span class="sn">${stg.n}</span><span class="sl">${stg.label}</span>${mark}</div>`;
+    stg.cats.forEach(k=>{const c=byKey[k];if(!c)return;const a=catTasks(k).length;
+      html+=`<div class="nav-i${k===CUR?' active':''}" onclick="select('${k}')"><span class="ico">${ICONS[c.icon]||'•'}</span><span class="nl">${c.label}</span><span class="cnt">${a?'<span class=dot></span>':''}${c.count}</span></div>`;});
+  });
+  $('#nav').innerHTML=html;}
+const GUIDE={
+  characters:'阶段1·设定：先确认角色三视图——它会作为后续分镜/视频锁脸/锁服装的参考。逐项「通过/需修改」，不满意就改提示词「重新生成」。',
+  scenes:'阶段1·设定：确认场景图（纯环境、无人物）。角色+场景都确认后，在对话里说「继续」，我来生成分镜。',
+  shots:'阶段2·分镜：每张分镜已自动参考阶段1 的人设图+场景图（参考图见下方）。确认机位与构图后说「继续」，我来出视频。',
+  clips:'阶段3·成片：建议先出 480p 样片确认，再升成片。可在卡片上调分辨率/时长后「重新生成」。',
+  voices:'阶段3·配音：为角色台词合成语音，确认音色与台词。'};
+function setGuide(key){const g=$('#guide');const has=S.has_key;
+  if(!has){g.className='guide warn';g.innerHTML='⚠ 还没配置 API Key，无法生成。请先在 <a onclick="openSettings()">设置 · 填 Key</a>。';return;}
+  g.className='guide';g.textContent=GUIDE[key]||'';}
+function select(key){CUR=key;const cat=S.categories.find(c=>c.key===key)||{};
+  $('#cat-title').textContent=cat.label||'';$('#cat-sub').textContent=`${cat.count||0} 项`;
+  const stg=(S.stages||[]).find(x=>x.cats.includes(key));
+  $('#stage-tag').textContent=stg?`阶段 ${stg.n} · ${stg.label}`:'';
+  setGuide(key);renderNav();renderCards();
   try{history.replaceState(null,'','#'+key);}catch(e){}}
 
 function mediaHTML(m){if(!m.src)return '';
@@ -767,6 +932,7 @@ function setBox(it){const o=S.options;
 
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function statHTML(t){if(!t)return '';
+  if(t.status==='draft')return `<div class="cstat"><div class="cmsg">✦ 已就绪：确认提示词/参考图后点「生成」。</div></div>`;
   if(t.status==='queued')return `<div class="cstat"><div class="cmsg">⏳ 排队中，等待空闲生成位…</div></div>`;
   if(t.status==='running')return `<div class="cstat"><div class="cprog"><span class="track"><span style="display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));width:${t.progress==null?30:t.progress}%;transition:width .3s"></span></span><span class="pp">${t.progress==null?'生成中':t.progress+'%'}</span></div>${t.message?`<div class="cmsg">${esc(t.message)}</div>`:''}</div>`;
   if(t.status==='failed')return `<div class="cstat"><div class="errbox">${esc(t.message||'生成失败')}</div></div>`;
@@ -774,23 +940,25 @@ function statHTML(t){if(!t)return '';
 
 function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
   const st=t?t.status:(it.media&&it.media.length?'done':'idle');
-  const cls=st==='running'?'running':st==='queued'?'queued':st==='failed'?'failed':(it.decision==='需修改'?'rev':'');
+  const cls=st==='running'?'running':st==='queued'?'queued':st==='draft'?'draft':st==='failed'?'failed':(it.decision==='需修改'?'rev':'');
   const badge={done:'<span class="badge done">✓ 完成</span>',running:'<span class="badge running">⟳ 生成中</span>',
-    queued:'<span class="badge queued">排队中</span>',failed:'<span class="badge failed">✕ 失败</span>'}[st]||'';
+    queued:'<span class="badge queued">排队中</span>',draft:'<span class="badge queued">✦ 待生成</span>',failed:'<span class="badge failed">✕ 失败</span>'}[st]||'';
   const isVoice=CUR==='voices';
   let mediaArea;
   if(st==='running'||st==='queued') mediaArea=`<div class="skeleton">${st==='queued'?'等待前序任务…':'渲染中…'}</div>`;
+  else if(st==='draft') mediaArea='<div class="skeleton">（待生成 · 确认后点「生成」）</div>';
   else{const m=(it.media||[]).map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
     mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
   const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="toggleRef(this)">✕</button></div>`).join('');
   const editBlock=isVoice?'':`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${it.prompt||''}</textarea>
-    <div class="lbl">参考图（可删 / 上传）</div><div class="refs">${refs}<label class="ref-up">＋ 上传<input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
+    <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
   const okOn=it.decision!=='需修改';
   const busy=(st==='running'||st==='queued');
-  const action=st==='failed'?`<button class="btn regen" onclick="regen(this)">↻ 重试</button>`
+  const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ 生成${isVoice?'配音':''}</button>`
+    :st==='failed'?`<button class="btn regen" onclick="regen(this)">↻ 重试</button>`
     :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isVoice?'重新配音':'重新生成这一张'}</button>`;
   return `<div class="card ${cls}" data-id="${it.id}">
-    <div class="ch"><h3>${it.title}</h3>${it.meta?`<span class="pill">${it.meta}</span>`:''}${badge}</div>
+    <div class="ch"><h3>${it.title}</h3>${it.meta?`<span class="pill" title="${it.meta}">${it.meta}</span>`:''}${badge}</div>
     ${statHTML(t)}
     ${mediaArea}
     ${editBlock}
@@ -814,16 +982,42 @@ function renderCards(){const items=(S.items[CUR]||[]).slice();
   const cat=S.categories.find(c=>c.key===CUR)||{};
   const ico={characters:'🧑',scenes:'🏙️',shots:'🎬',clips:'🎞️',voices:'🎙️'}[CUR]||'✨';
   const hint=S.has_key
-    ? '还没有内容。在对话里告诉我你想要的角色 / 场景 / 分镜，我会开始生成——进度会实时显示在这里。'
+    ? '这一阶段还没有内容。按阶段推进：人设/场景 → 分镜 → 视频；在对话里告诉我需求、或让我「继续下一阶段」即可，进度会实时显示在这里。'
     : '还没有内容。先打开 <a onclick="openSettings()">设置 · 填 API Key</a>，填好我就开始生成。';
   $('#cards').innerHTML=`<div class="empty"><div class="ico">${ico}</div><h3>${cat.label||''}</h3><p>${hint}</p></div>`;}
 
+let PICK_CARD=null;
+async function openPicker(btn){PICK_CARD=btn.closest('.card');
+  const b=$('#picker-body');b.innerHTML='<div style="color:var(--mut);padding:20px">加载中…</div>';
+  $('#picker').classList.add('show');
+  let r;try{r=await api('/api/files');}catch(e){r={groups:[]};}
+  if(!r.groups||!r.groups.length){b.innerHTML='<div style="color:var(--mut);padding:24px;text-align:center">工作目录里还没有图片。先生成人设/场景，或把图片放进 assets/refs/ 目录。</div>';return;}
+  b.innerHTML=r.groups.map(g=>`<div class="pg"><div class="pgl">${g.label}</div><div class="pgrid">${g.files.map(f=>`<img src="/media?path=${encodeURIComponent(f)}" title="${f}" onclick="pickFile('${f.replace(/'/g,"\\'")}')">`).join('')}</div></div>`).join('');}
+function closePicker(){$('#picker').classList.remove('show');}
+function pickFile(path){if(!PICK_CARD){closePicker();return;}
+  const wrap=PICK_CARD.querySelector('.refs'),up=wrap.querySelector('.ref-up');
+  if([...wrap.querySelectorAll('.ref')].some(d=>d.dataset.path===path)){closePicker();toast('已在参考图里');return;}
+  const d=document.createElement('div');d.className='ref';d.dataset.path=path;d.dataset.removed='0';
+  d.innerHTML=`<img src="/media?path=${encodeURIComponent(path)}" onclick="zoom('/media?path=${encodeURIComponent(path)}','ref')"><button class="rx" onclick="toggleRef(this)">✕</button>`;
+  wrap.insertBefore(d,up);closePicker();toast('已添加参考图：'+path);}
 function toggleRef(b){const d=b.parentElement;const r=d.dataset.removed==='1'?'0':'1';d.dataset.removed=r;d.classList.toggle('removed',r==='1');}
 const PENDING={};
-function addRefs(input){const id=input.closest('.card').dataset.id;PENDING[id]=PENDING[id]||[];
-  [...input.files].forEach(f=>{const rd=new FileReader();rd.onload=()=>{PENDING[id].push(rd.result);
-    const d=document.createElement('div');d.className='ref';d.dataset.added='1';d.innerHTML=`<img src="${rd.result}">`;
-    input.closest('.refs').insertBefore(d,input.closest('.ref-up'));};rd.readAsDataURL(f);});input.value='';}
+function addImageFile(card,f){if(!card||!f)return;const id=card.dataset.id;PENDING[id]=PENDING[id]||[];
+  const rd=new FileReader();rd.onload=()=>{PENDING[id].push(rd.result);
+    const wrap=card.querySelector('.refs'),up=wrap.querySelector('.ref-up');
+    const d=document.createElement('div');d.className='ref';d.dataset.added='1';d.dataset.removed='0';
+    d.innerHTML=`<img src="${rd.result}" onclick="zoom('${rd.result}','paste')"><button class="rx" onclick="toggleRef(this)">✕</button>`;
+    wrap.insertBefore(d,up);};rd.readAsDataURL(f);}
+function addRefs(input){const card=input.closest('.card');[...input.files].forEach(f=>addImageFile(card,f));input.value='';}
+// 记录“当前活动卡片”，支持 Ctrl+V 粘贴图片到该卡片
+let LAST_CARD=null;
+document.addEventListener('click',e=>{const c=e.target.closest&&e.target.closest('.card');if(c)LAST_CARD=c;},true);
+document.addEventListener('focusin',e=>{const c=e.target.closest&&e.target.closest('.card');if(c)LAST_CARD=c;});
+document.addEventListener('paste',e=>{const items=(e.clipboardData||{}).items;if(!items)return;
+  for(const it of items){if(it.type&&it.type.indexOf('image')===0){const f=it.getAsFile();
+    const card=LAST_CARD||document.querySelector('.card');
+    if(card&&f){addImageFile(card,f);const nm=(card.querySelector('h3')||{}).textContent||'';toast('已粘贴参考图到「'+nm+'」，点「重新生成/生成」生效');e.preventDefault();}
+    return;}}});
 function decide(btn,val){const seg=btn.parentElement;seg.querySelectorAll('button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
   const card=btn.closest('.card');card.classList.toggle('rev',val==='需修改');
   api('/api/decision',{category:CUR,id:card.dataset.id,decision:val,note:card.querySelector('[data-f=note]').value});}
@@ -835,33 +1029,40 @@ async function regen(btn){const card=btn.closest('.card');const id=card.dataset.
   if(!res.ok){toast('入队失败');return;}
   PENDING[id]=[];toast('已加入生成队列：'+id);poll();}
 
-async function poll(){let r;try{r=await api('/api/tasks');}catch(e){setTimeout(poll,2000);return;}
+async function poll(){let r;try{r=await api('/api/tasks');}catch(e){setTimeout(poll,2500);return;}
   const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);TOTS=r.totals;
   updateTop(r);renderNav();
-  // 当前分类的状态签名：覆盖 state 已有项 + 在途任务（含进度/状态行），任何变化都重画
+  // 任务集合变化（AI 推送了新一批草稿、或某任务完成/失败）→ 重新拉 state，保证前端自动反映最新，无需手动刷新
+  const keys=r.tasks.map(t=>tkey(t.category,t.item_id)+':'+t.status).sort().join('|');
+  const keysetChanged=keys!==poll._keys;poll._keys=keys;
+  const justFinished=r.tasks.some(t=>{const p=prev[tkey(t.category,t.item_id)];return p&&p.status!==t.status&&(t.status==='done'||t.status==='failed');});
+  if(keysetChanged||justFinished){try{S=await api('/api/state');}catch(e){}}
   const sig=r.tasks.filter(t=>t.category===CUR).map(t=>t.item_id+':'+t.status+':'+(t.progress||'')+':'+(t.message||'')).join('|')
     +'#'+(S.items[CUR]||[]).map(it=>it.id).join(',');
   const changed=sig!==poll._last;poll._last=sig;
-  const justFinished=r.tasks.some(t=>{const p=prev[tkey(t.category,t.item_id)];return p&&p.status!==t.status&&(t.status==='done'||t.status==='failed');});
-  if(justFinished){S=await api('/api/state');}
-  if(changed||justFinished)renderCards();
-  if(r.generating)setTimeout(poll,1200);
+  // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）
+  const ae=document.activeElement;
+  const editing=ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
+  if((changed||justFinished||keysetChanged)&&!editing)renderCards();
+  setTimeout(poll, r.generating?1200:2500);   // 持续轮询：既看进度，也接住 AI 后续推送的待生成任务
 }
-function updateTop(r){const t=r.totals,pb=$('#pbar'),go=$('#btn-go');
+function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
+  const drafts=t.draft||0;
+  gen.style.display=drafts?'inline-flex':'none';
+  gen.textContent=`▶ 开始生成（${drafts}）`;
   if(r.generating){pb.classList.remove('hide');
     $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.failed?' / '+t.failed+' 失败':''}`;
-    $('#pfill').style.width=(t.total?Math.round(t.done/t.total*100):0)+'%';
-    $('#pcost').textContent='~'+r.cost_total+' 元';
-    go.disabled=true;go.title='等生成完再继续';}
-  else{pb.classList.add('hide');go.disabled=false;go.title='';
+    $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-drafts)*100):0)+'%';
+    $('#pcost').textContent='~'+r.cost_total+' 元';}
+  else{pb.classList.add('hide');
     if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败，可在卡片上「重试」`;}}
 }
+async function generateAll(){const r=await api('/api/generate',{all:true});
+  toast(r.started?('开始生成 '+r.started+' 项'):'没有待生成的任务');poll();}
 async function stopAll(){await api('/api/stop',{});toast('已请求停止：排队任务取消，当前任务跑完即停');poll();}
-async function finish(action){if($('#btn-go').disabled&&action==='继续')return;
-  if(action==='重做这一批'&&!confirm('整批重做？'))return;
-  await api('/api/finish',{action});
-  document.body.innerHTML='<div style="height:100vh;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:15px;text-align:center;padding:40px">已提交「'+action+'」。可以关闭本页，回到对话即可，助手会继续。</div>';}
-
+async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;
+  try{await api('/api/shutdown',{});}catch(e){}
+  document.body.innerHTML='<div style="height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--mut);gap:8px;text-align:center;padding:40px"><div style="font-size:34px">⏻</div><div style="color:var(--ink);font-size:16px;font-weight:600">本地服务已关闭</div><div style="font-size:13.5px">可以关闭此标签页了。需要时在对话里让我重新打开创作台即可。</div></div>';}
 function openSettings(){$('#scrim').classList.add('show');$('#drawer').classList.add('show');try{history.replaceState(null,'','#config');}catch(e){}}
 function closeSettings(){$('#scrim').classList.remove('show');$('#drawer').classList.remove('show');try{history.replaceState(null,'','#'+(CUR||''));}catch(e){}}
 async function saveKey(){const el=$('#apikey');const k=(el.value||'').trim();if(!k){toast('请粘贴 API Key');return;}
@@ -927,19 +1128,40 @@ def daemonize(logpath):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
-    ap.add_argument("--plan", default=None, help="生成计划 JSON：启动即入队，边开页面边生成")
+    ap.add_argument("--plan", default=None, help="生成计划 JSON：作为「待生成」备好，等用户在 UI 点「开始生成」")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--concurrency", type=int, default=4, help="并行生成的任务数（默认 4）")
     ap.add_argument("--daemon", action="store_true",
                     help="脱离会话后台常驻（推荐）：不随启动命令返回/回合结束被回收")
+    ap.add_argument("--stop", action="store_true",
+                    help="停止该项目正在运行的服务（读 review/serve.pid 结束进程）")
     ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args()
 
     project = os.path.abspath(args.project)
-    pu.load_state(project)   # fork 前校验项目存在，错误能直接反馈给启动命令
     review_dir = pu.subdir(project, "review")
     os.makedirs(review_dir, exist_ok=True)
+    pid_file = os.path.join(review_dir, "serve.pid")
     url_file = os.path.join(review_dir, "serve_url.txt")
+
+    # --stop：结束正在运行的服务
+    if args.stop:
+        try:
+            pid = int(open(pid_file, encoding="utf-8").read().strip())
+            os.kill(pid, signal.SIGTERM)
+            print(f"已停止服务（PID {pid}）。")
+        except (FileNotFoundError, ValueError):
+            print("没有正在运行的服务（未找到 serve.pid）。")
+        except ProcessLookupError:
+            print("服务进程已不存在（可能已关闭）。")
+        for f in (pid_file, url_file):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        return
+
+    pu.load_state(project)   # fork 前校验项目存在，错误能直接反馈给启动命令
     try:
         os.remove(url_file)  # 清掉上一次的 URL，避免读到旧端口
     except OSError:
@@ -954,13 +1176,13 @@ def main():
     Handler.gq = GenQueue(project, concurrency=args.concurrency)
     Handler.project = project
 
-    # 载入生成计划：先入队，下面服务一启动 worker 即开始并行生成
+    # 载入生成计划：作为「待生成」草稿备好，等用户在 UI 点「开始生成」才真正跑（AI 只准备、不自动生成）
     if args.plan and os.path.exists(args.plan):
         with open(args.plan, encoding="utf-8") as f:
             plan = json.load(f)
         for spec in plan.get("tasks", []):
             if spec.get("category") and spec.get("id"):
-                Handler.gq.enqueue(spec)
+                Handler.gq.enqueue(spec, start=False)
 
     port = args.port
     httpd = None
@@ -978,8 +1200,13 @@ def main():
     url = f"http://127.0.0.1:{port}/"
     with open(url_file, "w", encoding="utf-8") as f:
         f.write(url)
-    with open(os.path.join(review_dir, "serve.pid"), "w", encoding="utf-8") as f:
+    with open(pid_file, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
+
+    def _on_term(*_a):
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, _on_term)   # kill / --stop 时干净退出
+
     if not args.no_open:
         try:
             import webbrowser
@@ -988,7 +1215,7 @@ def main():
             pass
     print(f"SERVE:{url}")
     print(f"LINK:[打开实时审核页 ↗]({url})")
-    print(f"实时审核服务已启动：{url}（并发 {args.concurrency} 路边生成边看进度；用户点「继续/重做这一批」后本服务自动退出）")
+    print(f"实时审核服务已启动：{url}（并发 {args.concurrency} 路，按阶段门控；常驻直到用户点「关闭服务」或 --stop）")
     print(f"  深链：{url}#config（配置/Key）、{url}#characters、{url}#scenes、{url}#shots、{url}#clips、{url}#voices", flush=True)
 
     try:
@@ -997,11 +1224,11 @@ def main():
         pass
     finally:
         httpd.server_close()
-
-    result_path = os.path.join(pu.subdir(project, "review"), "review_result.json")
-    if os.path.exists(result_path):
-        print("RESULT:" + result_path)
-        print(open(result_path, encoding="utf-8").read())
+        for f in (pid_file, url_file):   # 退出即清理，避免 --stop 命中陈旧 pid
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

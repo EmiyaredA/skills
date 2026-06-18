@@ -37,7 +37,7 @@ def main():
          "--text", "你怎么这么晚才来？", "--voice-id", "female_0033_b", "--mock"])
     run(["gen_video.py", "--project", proj, "--id", "clip_01", "--sample",
          "--prompt", "林夏推开便利店门回头一笑",
-         "--first-frame", "assets/shots/shot_01.png", "--duration", "5", "--mock"])
+         "--shots", "shot_01", "--characters", "char_01", "--duration", "5", "--mock"])
 
     # 实时审核服务：规范化 payload 应包含全部分类与已生成资产
     import serve_review as sr
