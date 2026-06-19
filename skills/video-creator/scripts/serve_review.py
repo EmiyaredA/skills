@@ -909,14 +909,15 @@ function setBox(it){const o=S.options;
     <label>时长(秒)<input type="number" data-f="duration" min="4" max="15" value="${it.duration||5}"></label>
   </div><label class="chk" style="margin-top:9px"><input type="checkbox" data-f="sample"> 用样片(更省积分)重生成</label></div>`;
   if(CUR==='voices')return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 配音设置</div><div class="sgrid">
-    <label>音色 ID<input type="text" data-f="voice_id" value="${it.voice_id||''}" placeholder="如 female_0033_b"></label><label>　</label></div>
-    <div class="lbl">台词文本</div><textarea data-f="text" placeholder="要合成的台词">${it.text||''}</textarea></div>`;
+    <label>音色 ID<input type="text" data-f="voice_id" value="${escA(it.voice_id)}" placeholder="如 female_0033_b"></label><label>　</label></div>
+    <div class="lbl">台词文本</div><textarea data-f="text" placeholder="要合成的台词">${esc(it.text)}</textarea></div>`;
   return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 本图生成设置（覆盖全局）</div><div class="sgrid">
     <label>模型<select data-f="model">${opt(o.image_models,it.model||S.config.image.model_final)}</select></label>
     <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
   </div><label class="chk" style="margin-top:9px"><input type="checkbox" data-f="sample"> 用样片模型(更省)重生成</label></div>`;}
 
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function escA(s){return esc(s).replace(/"/g,'&quot;');}   // 属性值转义（额外处理引号）
 function statHTML(t){if(!t)return '';
   if(t.status==='draft')return `<div class="cstat"><div class="cmsg">✦ 已就绪：确认提示词/参考图后点「生成」。</div></div>`;
   if(t.status==='queued')return `<div class="cstat"><div class="cmsg">⏳ 排队中，等待空闲生成位…</div></div>`;
@@ -936,7 +937,7 @@ function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
   else{const m=(it.media||[]).map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
     mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
   const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button></div>`).join('');
-  const editBlock=isVoice?'':`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${it.prompt||''}</textarea>
+  const editBlock=isVoice?'':`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${esc(it.prompt)}</textarea>
     <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
   const okOn=it.decision!=='需修改';
   const busy=(st==='running'||st==='queued');
@@ -944,14 +945,14 @@ function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
     :st==='failed'?`<button class="btn regen" onclick="regen(this)">↻ 重试</button>`
     :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isVoice?'重新配音':'重新生成这一张'}</button>`;
   return `<div class="card ${cls}" data-id="${it.id}">
-    <div class="ch"><h3>${it.title}</h3>${it.meta?`<span class="pill" title="${it.meta}">${it.meta}</span>`:''}${badge}</div>
+    <div class="ch"><h3>${esc(it.title)}</h3>${it.meta?`<span class="pill" title="${escA(it.meta)}">${esc(it.meta)}</span>`:''}${badge}</div>
     ${statHTML(t)}
     ${mediaArea}
     ${editBlock}
     ${setBox(it)}
     <div class="foot">
       <div class="seg"><button class="ok${okOn?' on':''}" onclick="decide(this,'通过')">✓ 通过</button><button class="no${!okOn?' on':''}" onclick="decide(this,'需修改')">✎ 需修改</button></div>
-      <input class="note" type="text" data-f="note" placeholder="意见（可留空）" value="${(it.note||'').replace(/"/g,'&quot;')}">
+      <input class="note" type="text" data-f="note" placeholder="意见（可留空）" value="${escA(it.note)}">
       ${action}
     </div></div>`;}
 
@@ -1075,7 +1076,7 @@ function renderSettings(){const c=S.config,o=S.options;const sel=(f,list,val)=>`
   const keyState=S.has_key?'<span style="color:var(--ok)">· 已配置</span>':'<span style="color:var(--no)">· 未配置，下面填入</span>';
   const access=`<div class="grp" id="grp-access"><div class="t">接入与目录</div>
      <div class="dfield"><label>工作目录（固定根目录）</label>
-       <div style="display:flex;gap:8px;align-items:center"><input type="text" value="${S.project||''}" readonly style="flex:1">
+       <div style="display:flex;gap:8px;align-items:center"><input type="text" value="${escA(S.project)}" readonly style="flex:1">
        <a class="btn ghost sm" href="file://${S.project||''}" target="_blank">打开</a></div></div>
      <div class="dfield"><label>API Key ${keyState}</label>
        <div style="display:flex;gap:8px"><input type="password" id="apikey" placeholder="sk-…（粘贴后点保存，只写入 .sa_key）" style="flex:1">
@@ -1083,7 +1084,7 @@ function renderSettings(){const c=S.config,o=S.options;const sel=(f,list,val)=>`
   $('#dbody').innerHTML=access+`
    <div class="grp"><div class="t">全局</div>
      <div class="dfield"><label>画幅</label>${sel('ratio',o.ratios,c.ratio)}</div>
-     <div class="dfield"><label>视觉风格</label><input type="text" data-c="style" value="${c.style||''}" placeholder="如 写实电影感"></div></div>
+     <div class="dfield"><label>视觉风格</label><input type="text" data-c="style" value="${escA(c.style)}" placeholder="如 写实电影感"></div></div>
    <div class="grp"><div class="t">图像</div>
      <div class="dfield"><label>成片模型</label>${sel('image.model_final',o.image_models,c.image.model_final)}</div>
      <div class="dfield"><label>样片模型</label>${sel('image.model_sample',o.image_models,c.image.model_sample)}</div></div>
@@ -1095,7 +1096,7 @@ function renderSettings(){const c=S.config,o=S.options;const sel=(f,list,val)=>`
      <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.generate_audio" ${c.video.generate_audio?'checked':''}> 生成音轨</label></div>
      <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.watermark" ${c.video.watermark?'checked':''}> 水印</label></div></div>
    <div class="grp"><div class="t">语音</div>
-     <div class="dfield"><label>默认音色 ID</label><input type="text" data-c="audio.voice_id" value="${c.audio.voice_id||''}" placeholder="如 female_0033_b"></div>
+     <div class="dfield"><label>默认音色 ID</label><input type="text" data-c="audio.voice_id" value="${escA(c.audio.voice_id)}" placeholder="如 female_0033_b"></div>
      <div class="dfield"><label>语速</label><input type="number" data-c="audio.speed" step="0.1" min="0.5" max="2" value="${c.audio.speed}"></div></div>`;
   $('#dbody').querySelectorAll('[data-c]').forEach(e=>e.addEventListener('change',saveSettings));}
 function setDeep(o,path,val){const ks=path.split('.');let cur=o;for(let i=0;i<ks.length-1;i++){cur[ks[i]]=cur[ks[i]]||{};cur=cur[ks[i]];}cur[ks[ks.length-1]]=val;}

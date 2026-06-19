@@ -40,7 +40,6 @@ def main():
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--reference", default=None, help="参考图（分镜图/角色图…），逗号分隔")
     ap.add_argument("--characters", default=None, help="出场角色 id，逗号分隔；自动注入角色锚点+各角色参考图")
-    ap.add_argument("--scene", default=None, help="场景 id；自动把场景图作参考")
     ap.add_argument("--prev-video", default=None, help="承接的前置视频（http(s) URL）")
     ap.add_argument("--next-video", default=None, help="续接的后置视频（http(s) URL）")
     ap.add_argument("--audio", default=None, help="驱动音频（本地路径或URL）")
