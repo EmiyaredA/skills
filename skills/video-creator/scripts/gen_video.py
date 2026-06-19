@@ -66,7 +66,7 @@ def run_video_generation(project, *, item_id, prompt, reference=None, characters
     char_ids = pu.parse_id_list(characters)
     shot_ids = pu.parse_id_list(shots)
 
-    if not refs or not char_ids or shot_ids:
+    if not refs or not char_ids or shot_ids:  # 缺参考/角色，或有 shots 时需 resolve 注入分镜图
         spec = {"characters": characters, "shots": shots, "references": refs}
         pu.resolve_generation_refs(state, "clips", spec)
         if not refs:

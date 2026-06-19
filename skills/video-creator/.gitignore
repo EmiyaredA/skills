@@ -3,6 +3,8 @@
 */assets/
 */output/
 */review/
+!scripts/review/
+!scripts/review/**
 __pycache__/
 *.pyc
 .env

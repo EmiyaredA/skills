@@ -97,7 +97,7 @@ def main():
         raise SystemExit(2)
 
     ratio = args.ratio or state.get("config", {}).get("ratio", "16:9")
-    w, h = RATIO_DIMS.get(ratio, (1080, 1920))
+    w, h = RATIO_DIMS.get(ratio, (1920, 1080))
 
     outdir = pu.subdir(args.project, "output")
     os.makedirs(outdir, exist_ok=True)

@@ -10,7 +10,6 @@ SoWork 工作区里用户没有终端来 export，故由助手在收到用户提
 平台已注入 SENSEAUDIO_API_KEY 环境变量时无需本脚本。
 """
 import argparse
-import os
 import sys
 
 import project_utils as pu

@@ -85,7 +85,6 @@ main{flex:1;min-width:0;display:flex;flex-direction:column}
 .thumb .dl{position:absolute;top:8px;right:8px;width:30px;height:30px;border-radius:9px;background:rgba(8,10,16,.6);color:#fff;text-align:center;line-height:32px;text-decoration:none;border:1px solid rgba(255,255,255,.18);opacity:0;transition:.15s;backdrop-filter:blur(4px)}
 .thumb:hover .dl{opacity:1}.thumb .dl:hover{background:var(--accent);color:#0a1230}
 .cap{font-size:11px;color:var(--mut);text-align:center;margin-top:5px}
-.aud{display:flex;flex-direction:column;gap:5px;align-items:flex-start}.aud audio{width:248px}
 .lbl{font-size:12px;color:var(--mut);margin:11px 0 5px;font-weight:500}
 textarea,input[type=text],input[type=number],select{width:100%;background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:10px;padding:9px 11px;font:13px/1.5 inherit;transition:.12s}
 textarea{resize:vertical;min-height:62px}
@@ -159,7 +158,7 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
         <span class="ptext" id="ptext"></span>
         <span class="track"><span id="pfill"></span></span>
         <span class="ptext" id="pcost"></span>
-        <button class="btn ghost sm" onclick="stopAll()">全部停止</button>
+        <button class="btn ghost sm" onclick="stopAll()" title="取消排队任务；进行中的图像/视频会跑完">全部停止</button>
       </div>
       <div class="guide" id="guide"></div>
     </div>
@@ -184,7 +183,7 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
 <div class="toast" id="toast"></div>
 
 <script>
-let S=null, CUR=null, TASK={}, TOTS=null, POLL_T=null, VMODE='sample';   // VMODE: 视频子页 样片/成片
+let S=null, CUR=null, TASK={}, POLL_T=null, VMODE='sample';
 const $=s=>document.querySelector(s);
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2600);}
 function zoom(src,name){$('#lbimg').src=src;const d=$('#lbdl');d.href=src;d.download=name||'image';$('#lb').classList.add('show');}
@@ -205,8 +204,7 @@ function applyHash(){const h=(location.hash||'').slice(1);
   if(h&&S.categories.some(c=>c.key===h))select(h);}
 window.addEventListener('hashchange',applyHash);
 function catTasks(key){return Object.values(TASK).filter(t=>t.category===key&&(t.status==='running'||t.status==='queued'));}
-const ICONS={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️',film:'📽️'};
-function stageOfCat(k){const s=(S.stages||[]).find(x=>x.cats.includes(k));return s?s.n:1;}
+const ICONS={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️'};
 function stageState(stg){  // 'active' 有任务在跑 | 'done' 有成果且无在跑 | 'idle' 空
   const act=Object.values(TASK).some(t=>stg.cats.includes(t.category)&&(t.status==='running'||t.status==='queued'));
   if(act)return 'active';
@@ -250,7 +248,6 @@ function select(key,mode){CUR=key;if(key==='clips'&&mode)VMODE=mode;
 
 function mediaHTML(m){if(!m.src)return '';
   if(m.type==='video')return `<div class="thumb"><video controls preload="metadata" src="${m.src}"></video><a class="dl" href="${m.src}" download="${m.name}">⬇</a></div>`;
-  if(m.type==='audio')return `<div class="aud"><audio controls src="${m.src}"></audio><a class="dl" style="position:static;width:auto;height:auto;line-height:1.4;padding:3px 9px;font-size:12px" href="${m.src}" download="${m.name}">⬇ 下载</a></div>`;
   return `<div class="thumb"><img src="${m.src}" loading="lazy" onclick="zoom('${m.src}','${m.name}')"><a class="dl" href="${m.src}" download="${m.name}" onclick="event.stopPropagation()">⬇</a></div>`;}
 function opt(list,val){return list.map(o=>{const v=typeof o==='string'?o:o.id;const lab=typeof o==='string'?o:`${o.id}（~${o.price}元/张）`;return `<option value="${v}"${v===val?' selected':''}>${lab}</option>`;}).join('');}
 function setBox(it,locked){const o=S.options;const dis=locked?' disabled':'';
@@ -440,7 +437,7 @@ async function poll(force){let r=null;
   if(POLL_T){clearTimeout(POLL_T);POLL_T=null;}   // 保证全程只有一条轮询链，避免每次手动 poll() 叠加成轮询风暴
   try{
     r=await api('/api/tasks');
-    const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);TOTS=r.totals;
+    const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);
     updateTop(r);renderNav();
     // 任务集合变化（AI 推送了新一批草稿、或某任务完成/失败）→ 重新拉 state，保证前端自动反映最新，无需手动刷新
     const keys=r.tasks.map(t=>tkey(t.category,t.item_id)+':'+t.status).sort().join('|');
@@ -458,11 +455,12 @@ async function poll(force){let r=null;
   POLL_T=setTimeout(poll, (r&&r.generating)?1200:1800);   // 持续轮询：看进度 + 接住 AI 推送的草稿/参考图
 }
 function curStageCats(){const stg=(S.stages||[]).find(x=>x.cats.includes(CUR));return stg?stg.cats:[CUR];}
+function clipPartDone(cl,mode){const p=cl[mode]||{};return (p.media||[]).some(m=>m.src);}
 function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
-  if(CUR==='clips'){   // 视频：一键生成本子页全部（样片或成片），不是只生成草稿
-    const cnt=(S.items.clips||[]).length;
+  if(CUR==='clips'){
+    const cnt=(S.items.clips||[]).filter(cl=>!clipPartDone(cl,VMODE)).length;
     gen.style.display=cnt?'inline-flex':'none';
-    gen.textContent=`▶ 一键生成${VMODE==='sample'?'样片':'成片'}（${cnt}）`;
+    gen.textContent=`▶ 生成${VMODE==='sample'?'样片':'成片'}（${cnt} 待出）`;
   }else{
     const cats=curStageCats();   // 「开始生成」只作用于当前阶段
     const sd=r.tasks.filter(x=>x.status==='draft'&&cats.includes(x.category)).length;
@@ -478,12 +476,12 @@ function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
 }
 async function generateAll(){
   if(CUR==='clips'){const r=await api('/api/generate-clips',{sample:VMODE==='sample'});
-    toast(r.started?(`开始生成${VMODE==='sample'?'样片':'成片'} ${r.started} 段`):'没有可生成的视频片段（先让 AI 备好 clip 任务）');poll(true);return;}
+    toast(r.started?(`开始生成${VMODE==='sample'?'样片':'成片'} ${r.started} 段`):`没有待生成的${VMODE==='sample'?'样片':'成片'}（已完成项请用卡片「重新生成」）`);poll(true);return;}
   const r=await api('/api/generate',{categories:curStageCats()});
   toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll(true);}
-async function stopAll(){const r=await api('/api/stop',{});toast(r.stopped?(`已停止 ${r.stopped} 项（含进行中的任务）`):'没有可停止的任务');poll(true);}
+async function stopAll(){const r=await api('/api/stop',{});toast(r.stopped?(`已停止 ${r.stopped} 项排队任务（进行中的会跑完）`):'没有可停止的任务');poll(true);}
 async function stopOne(btn){const card=btn.closest('.card');const id=card.dataset.id;
-  const r=await api('/api/stop',{category:CUR,id});toast(r.stopped?('已停止：'+id):'该任务不在排队/生成中');poll(true);}
+  const r=await api('/api/stop',{category:CUR,id});toast(r.stopped?('已停止排队：'+id+'（若已在生成会跑完）'):'该任务不在排队中');poll(true);}
 async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;
   try{await api('/api/shutdown',{});}catch(e){}
   document.body.innerHTML='<div style="height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--mut);gap:8px;text-align:center;padding:40px"><div style="font-size:34px">⏻</div><div style="color:var(--ink);font-size:16px;font-weight:600">本地服务已关闭</div><div style="font-size:13.5px">可以关闭此标签页了。需要时在对话里让我重新打开创作台即可。</div></div>';}

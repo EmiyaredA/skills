@@ -24,7 +24,7 @@ SUBDIRS = [
     ("shots",      "assets/shots",      "分镜图", "🎬"),   # 分镜 / 机位预览
     ("refs",       "assets/refs",       "参考素材", "🖼️"),  # 用户上传 / 抽帧的参考图
     ("output",     "output",            "成片输出", "🎞️"),  # 生成的视频
-    ("review",     "review",            "审核页", "📝"),    # 实时应用产物（serve_url.txt / plan.json / serve.pid / serve.log）
+    ("review",     "review",            "审核页", "📝"),    # serve_url.txt / serve.pid / serve.log
     ("docs",       "docs",              "文稿", "📄"),      # 剧本 / 说明
 ]
 
@@ -369,3 +369,130 @@ def apply_plan_meta(state, plan_body):
     for k in ("logline", "summary", "beats"):
         if k in story:
             st[k] = story[k]
+
+
+# ---------- 参考图读写（clips 用 inputs.reference，其余用 references） ----------
+
+def get_refs(item, category=None):
+    """从 state 条目或 spec 读取参考图路径列表。"""
+    if not item:
+        return []
+    if category == "clips" or (category is None and "inputs" in item and "sample" in item):
+        return list((item.get("inputs") or {}).get("reference") or [])
+    refs = item.get("references")
+    if refs:
+        return list(refs)
+    r = item.get("reference")
+    if not r:
+        return []
+    return [r] if isinstance(r, str) else list(r)
+
+
+def set_refs(item, category, refs):
+    """写入参考图路径列表。"""
+    refs = list(refs or [])
+    if category == "clips":
+        item.setdefault("inputs", {})["reference"] = refs
+    else:
+        item["references"] = refs
+        item.pop("reference", None)
+
+
+def item_has_output(state, category, item_id):
+    """条目是否已有生成产出（用于 plan 跳过重推）。"""
+    it = find(state.get(category, []), item_id)
+    if not it:
+        return False
+    if category == "characters":
+        return bool(it.get("three_view") or it.get("image"))
+    if category == "clips":
+        for k in ("sample", "final"):
+            p = it.get(k) or {}
+            if p.get("local_path") or p.get("video_url"):
+                return True
+        return False
+    if category == "exports":
+        return bool(it.get("video_url") or it.get("local_path"))
+    return bool(it.get("image"))
+
+
+def clip_part_done(cl, sample):
+    """clip 的样片或成片是否已有产出。"""
+    p = cl.get("sample" if sample else "final") or {}
+    return bool(p.get("local_path") or p.get("video_url"))
+
+
+def plan_task_skippable(state, spec, active_keys, force=False):
+    """判断是否应跳过 plan 入队。返回 (skip: bool, reason: str)。"""
+    if force:
+        return False, ""
+    cat, iid = spec.get("category"), spec.get("id")
+    if not cat or not iid:
+        return True, "缺少 category/id"
+    key = f"{cat}::{iid}"
+    if key in active_keys:
+        return True, "队列中"
+    it = find(state.get(cat, []), iid)
+    if not it:
+        return False, ""
+    if it.get("review_decision") == "需修改":
+        return False, ""
+    if it.get("review_decision") == "通过":
+        return True, "已通过"
+    if item_has_output(state, cat, iid):
+        return True, "已有产出"
+    return False, ""
+
+
+# ---------- 审核服务进程（push_plan / serve_review 共用） ----------
+
+def review_paths(project):
+    review = subdir(project, "review")
+    return (
+        os.path.join(review, "serve.pid"),
+        os.path.join(review, "serve_url.txt"),
+    )
+
+
+def service_running(project):
+    """返回 (running: bool, url: str|None, detail: str)。"""
+    pid_file, url_file = review_paths(project)
+    url = None
+    try:
+        url = open(url_file, encoding="utf-8").read().strip()
+    except OSError:
+        pass
+    try:
+        pid = int(open(pid_file, encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        return False, url, "未找到 serve.pid"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, url, f"进程已不存在（PID {pid}）"
+    except PermissionError:
+        pass
+    if not url:
+        return False, None, f"进程 {pid} 在跑但未找到 serve_url.txt"
+    return True, url, f"PID {pid}"
+
+
+def stop_serve(project):
+    """停止 serve_review 进程并清理 pid/url 文件。"""
+    import signal
+    pid_file, url_file = review_paths(project)
+    try:
+        pid = int(open(pid_file, encoding="utf-8").read().strip())
+        os.kill(pid, signal.SIGTERM)
+        print(f"已停止服务（PID {pid}）。")
+    except (FileNotFoundError, ValueError):
+        print("没有正在运行的服务。")
+        return False
+    except ProcessLookupError:
+        print("服务进程已不存在。")
+    for f in (pid_file, url_file):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    return True
