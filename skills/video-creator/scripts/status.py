@@ -2,7 +2,7 @@
 
 **state.json 是事实来源**：即使实时服务（serve_review）重启、其内存任务队列被清空，
 已经生成好的资产仍然在 state.json 里。续作前务必用本脚本（或直接读 state.json）确认，
-**只准备缺失的 / 下一阶段的任务（POST /api/plan），绝不重推已生成的资产，也绝不调用 /api/generate 触发生成**。
+**只准备缺失的 / 下一阶段的任务（`push_plan.py` 推到已在跑的服务），绝不重推已生成的资产，也绝不 `--daemon` 重启、绝不调用 /api/generate 触发生成**。
 
   python status.py --project /abs/项目目录        # 人类可读 + 末尾一段 JSON
   python status.py --project /abs/项目目录 --json   # 只输出 JSON（便于解析，无管道）

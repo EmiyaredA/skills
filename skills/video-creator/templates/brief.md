@@ -32,5 +32,6 @@
 - 景别（远/全/中/近/特写）、机位（平/俯/仰/过肩）、运动（固定/推拉/横摇/跟拍）
 
 > 对齐充分后，把角色三视图与场景图写进 `plan.json`，
-> 按 SKILL.md「启动协议」用 `serve_review.py --project "$P" --daemon [--plan …]` 常驻启动应用；
-> 读 `review/serve_url.txt` 取真实 URL，**告知用户在 UI 点「开始生成」并结束回合**；用户满意并标记通过后，再备阶段 2 分镜草稿。
+> **首轮**按 SKILL.md「启动协议」`serve_review --daemon [--plan …]`；
+> **之后各阶段**用 `push_plan.py --project "$P" --plan …` 推到**同一服务**，勿再 `--daemon`。
+> 读 `review/serve_url.txt` 取 URL（全程同一链接），**告知用户在 UI 点「开始生成」并结束回合**；用户满意并标记通过后，再备阶段 2 分镜草稿。

@@ -2,7 +2,7 @@
 name: video-creator
 description: >-
   帮助用户用 SenseAudio API 创作 AI 短剧视频。四阶段流水：①人设+场景 → ②分镜 → ③视频成片（480p 样片→高清）
-  → ④导出拼接。助手只备 plan 草稿（POST /api/plan 或 --plan），生成由用户在 serve_review UI 点「开始生成」触发，助手不得代点。
+  → ④导出拼接。助手只备 plan 草稿（push_plan.py / POST /api/plan），生成由用户在 serve_review UI 点「开始生成」触发；同一项目只启动一次服务，续作用 push_plan 勿重启。
   收到剧情时先拆多个独立 clip（硬切、时长 5/10/15s）。唯一前端 serve_review.py 本地 Web 应用。
   适用于 AI 短剧、视频生成、分镜、角色设计等场景。
 homepage: https://senseaudio.cn
@@ -24,19 +24,22 @@ license: Complete terms in LICENSE.txt
 
 1. **没 Key 就引导去 `#config`，绝不 mock。** Key 来源：环境变量 `SENSEAUDIO_API_KEY` > 项目 `.sa_key`。严禁用 `--mock` 交付（仅 `selftest.py` 自检）。
 2. **你只「准备」plan 草稿；触发生成是用户的专属动作。** 用户在 UI 点「▶ 开始生成」/「合成导出」/卡片「重试」才跑。备完稿后**立刻结束回合**，把链接交给用户，**不要**替用户点生成、不要轮询等完成。别说「已开始生成」「正在生成中」——应说「草稿已备好，请在页面点开始生成」。
-3. **阶段顺序不可逆**：人设+场景(1) → 分镜(2) → 视频(3) → 导出(4)。队列阶段门控；分阶段推进，不要一次塞满。
+3. **同一项目只启动一次服务，续作勿重启。** 首轮 `--daemon` 后全程复用 `$P/review/serve_url.txt` 同一链接；用户说「继续」时用 `push_plan.py` 往**已在跑**的服务推下一阶段草稿。**禁止**为备稿再次 `--daemon`（旧进程仍占端口时会自增到 8766、8775…，用户浏览器链接失效）。
+4. **阶段顺序不可逆**：人设+场景(1) → 分镜(2) → 视频(3) → 导出(4)。队列阶段门控；分阶段推进，不要一次塞满。
 
 ## 助手职责边界（严禁越权）
 
-**你的职责**：对齐需求 → 写 `plan.json` → `serve_review --daemon [--plan …]` 或 `POST /api/plan` 把任务落为「待生成」草稿 → 给用户真实 URL → **结束回合**。
+**你的职责**：对齐需求 → 写 `plan.json` → **首轮** `serve_review --daemon [--plan …]` **或续作** `push_plan.py` → 给用户**同一个** URL → **结束回合**。
 
 **只允许你调用**（准备 / 读状态 / 环境）：
 
 | 动作 | 方式 |
 |------|------|
 | 建项目 | `init_project.py` |
-| 开/关前端 | `serve_review.py --daemon` / `--stop` |
-| 备草稿 | 写 `plan.json` + `--plan`，或 `POST /api/plan`（仅 `start=False` 语义） |
+| **首轮**开前端 | `serve_review.py --project "$P" --port 8765 --daemon [--plan plan.json]`（**每个项目只执行一次**） |
+| **续作**备草稿 | `push_plan.py --project "$P" --plan plan.json`（**勿再 --daemon**） |
+| 检查服务是否在跑 | `push_plan.py --project "$P" --check` → 读 `SERVE_OK:` 后的 URL |
+| 关前端 | `serve_review.py --project "$P" --stop`（仅用户要求关闭时） |
 | 读进度 | `status.py --project "$P"`（读 `state.json`，**不**轮询 `/api/tasks`） |
 | Key/环境/成本 | `check_key.py`、`ensure_env.py`、`estimate_cost.py` |
 
@@ -50,19 +53,34 @@ license: Complete terms in LICENSE.txt
 | `POST /api/stop` | 用户在 UI 点「停止」 |
 | 直接运行 `gen_image.py` / `gen_video.py` / `concat_clips.py` | 由 serve_review worker 或用户在 UI 触发（`selftest.py` 除外） |
 | 轮询 `/api/tasks` 等待生成完成 | 进度在浏览器里看；你只在用户说「继续/做完了吗」时用 `status.py` 读盘 |
+| 为续作再次 `--daemon` | 会占新端口、旧链接失效；用 `push_plan.py` |
+| `serve_review --daemon --plan` 备下一阶段 | 同上；续作用 `push_plan.py` |
 
 **备稿后的标准话术**：给出 `serve_url.txt` 链接 + 当前阶段 +「请在页面确认草稿后点 ▶ 开始生成；满意后标记通过，再叫我备下一阶段」→ **结束回合，不要接着跑生成。**
 
-## 启动协议（必做）
+## 启动协议
 
-1. `init_project.py` 建工作目录。
-2. **必须 `--daemon` 常驻**（否则回合卡死 / 服务被回收）：
+### 首轮（新建项目，只做一次）
+
+1. `init_project.py` 建工作目录，记为 `$P`。
+2. **只此一次** `--daemon` 常驻：
    ```bash
-   python3 scripts/serve_review.py --project <工作目录> --port 8765 --daemon [--plan plan.json]
+   python3 scripts/serve_review.py --project "$P" --port 8765 --daemon [--plan plan.json]
    ```
    不要用 `run_in_background`；输出写 `review/serve.log`。
-3. 读真实 URL：`sleep 1; cat <工作目录>/review/serve_url.txt`（端口可能自增，勿假设 8765）。
-4. 把真实链接放进回复，**告知用户在 UI 点「开始生成」**，然后**结束回合**（不要接着触发生成或轮询进度）。打不开时用同 `--port` 重新 `--daemon` 启动。
+3. 读 URL：`sleep 1; cat "$P/review/serve_url.txt"`（若 8765 被占会自增，以文件为准）。
+4. 把链接放进回复 → 告知用户点「开始生成」→ **结束回合**。
+
+### 续作（用户说「继续」/备下一阶段）—— **禁止再 --daemon**
+
+1. **复用同一 `$P`**（从对话上下文取项目路径，不要新建目录）。
+2. 先 `python scripts/status.py --project "$P"` 看 `next_stage`。
+3. 检查服务：`python scripts/push_plan.py --project "$P" --check`
+   - 若在跑 → 写下一阶段 `plan.json` → `python scripts/push_plan.py --project "$P" --plan plan.json`
+   - 若不在跑（`SERVE_DOWN`）→ **仅此时**可 `--stop` 清陈旧 pid 后，用**同一 `--port`** 重新 `--daemon`（优先读旧 `serve_url.txt` 里的端口号）。
+4. 回复里给**同一个 URL**（`cat "$P/review/serve_url.txt"`），深链到对应阶段如 `#shots`。**不要给新端口链接。**
+
+> **为何不能重复 --daemon？** 旧服务进程通常还在，新启动会从 `--port` 起找空闲端口（8765→8766→…→8775），用户浏览器仍开着旧链接，体验混乱。
 
 ## 应用速览
 
@@ -86,7 +104,7 @@ license: Complete terms in LICENSE.txt
 
 ## 续作
 
-用户说「继续」→ 先 `python scripts/status.py --project "$P"`（读 `state.json`，不看内存队列）→ 只补 `next_stage` 缺失项（`POST /api/plan` 或 `--plan`），**绝不重推已通过资产，也绝不调用 `/api/generate`**。备完下一阶段草稿后同样交给用户在 UI 生成。
+用户说「继续」→ `status.py` 读 `next_stage` → **`push_plan.py` 推草稿到已在跑的服务**（见上节「续作」协议）。**绝不** `--daemon` 重启、**绝不** `/api/generate`、**绝不**重推已通过资产。回复沿用 `$P/review/serve_url.txt` 同一链接。
 
 ## 环境依赖
 
@@ -104,7 +122,7 @@ python scripts/init_project.py --parent /abs/sa_drama --title "<标题>"   # →
 python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 ```
 
-每轮对话新建 `$P`；本轮内复用。对齐清单见 [templates/brief.md](templates/brief.md)。
+每轮对话新建 `$P`；**同一轮对话内全程复用同一 `$P` 与同一 serve URL**。对齐清单见 [templates/brief.md](templates/brief.md)。
 
 ## 阶段 1：人设 + 场景
 
@@ -142,7 +160,9 @@ python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 |------|------|
 | 初始化 | `python scripts/init_project.py --parent /abs/sa_drama --title "..."` |
 | 进度 | `python scripts/status.py --project "$P"` |
-| 启动前端 | `python3 scripts/serve_review.py --project "$P" --port 8765 --daemon [--plan plan.json]` → `cat review/serve_url.txt` |
+| **首轮**启动 | `python3 scripts/serve_review.py --project "$P" --port 8765 --daemon [--plan plan.json]` → `cat review/serve_url.txt` |
+| **续作**推 plan | `python scripts/push_plan.py --project "$P" --plan plan.json` |
+| 检查服务 | `python scripts/push_plan.py --project "$P" --check` |
 | 停止 | `python3 scripts/serve_review.py --project "$P" --stop` |
 | 检查 Key | `python scripts/check_key.py --project "$P"`（2=缺 Key） |
 | 环境 | `python scripts/ensure_env.py --install --export` |
@@ -166,6 +186,8 @@ python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 
 | 诉求 | 操作 |
 |------|------|
+| 用户说「继续」 | `status.py` + `push_plan.py`，**不要** `--daemon` 重启 |
+| 链接打不开 / 服务挂了 | `push_plan.py --check`；确认 down 后 `--stop` 再同端口 `--daemon` |
 | 角色漂移/性别错 | 阶段1 在 UI 重出；分镜/视频带 `characters`，prompt 写清人数与动作 |
 | 构图不对 | 阶段2 改分镜 → 用户在 UI 重出 clip |
 | 画质/时长 | 阶段3 用户在 UI 调参数重出 |

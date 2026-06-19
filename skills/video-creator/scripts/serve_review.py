@@ -6,7 +6,7 @@
 - 生成分阶段、队列按阶段门控：阶段1 人设+场景 → 阶段2 分镜（用人设/场景图作参考）→ 阶段3 视频 → 阶段4 导出。
 - 用户在页面上看进度；完成的卡片可立刻改提示词/参考图/模型/设置并「重新生成」；失败/超时会**自动重试最多 3 次**，仍失败可在卡片上手动「重试」；
   点侧边栏「设置」随时改全局配置/Key、即时落盘生效。
-- 服务**常驻**（无「继续/重做」提交闭环）。助手续作下一阶段时：读 /api/state 判断阶段 → POST /api/plan 推进。
+- 服务**常驻**（无「继续/重做」提交闭环）。助手续作下一阶段时：`status.py` 读盘 → **`push_plan.py` 推草稿到已在跑的服务**（禁止再次 `--daemon`，否则会占新端口）。
   停止：用户点侧边栏「关闭服务」、助手 `--stop`、或 kill serve.pid。
 
 接口：
@@ -27,6 +27,7 @@
   POST /api/shutdown     关停本地服务
 
   python serve_review.py --project ./drama [--plan plan.json] [--port 8765] [--daemon] [--stop]
+  python push_plan.py --project ./drama --plan plan.json   # 续作：推草稿到已在跑的服务，勿重启
   （常驻启动加 --daemon：脚本自行双 fork 脱离会话，启动命令瞬间返回、服务独立存活，见 SKILL.md 启动协议）
 
 plan.json 形如：{"tasks":[
