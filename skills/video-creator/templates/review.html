@@ -62,6 +62,8 @@ main{flex:1;min-width:0;display:flex;flex-direction:column}
 .card.draft{border-style:dashed;border-color:var(--line2)}
 .card.failed{border-color:var(--no)}
 .card.rev{border-color:var(--no)}
+.card-edits.locked{pointer-events:none;opacity:.55;filter:saturate(.88)}
+.card-edits.locked .lbl::after{content:" · 生成中锁定";font-weight:400;color:var(--soft)}
 .ch{display:flex;align-items:center;gap:8px;margin-bottom:12px;min-width:0}
 .ch h3{font-size:15.5px;margin:0 auto 0 0;font-weight:650;min-width:0;overflow-wrap:anywhere}
 .badge{font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600;letter-spacing:.02em}
@@ -251,18 +253,18 @@ function mediaHTML(m){if(!m.src)return '';
   if(m.type==='audio')return `<div class="aud"><audio controls src="${m.src}"></audio><a class="dl" style="position:static;width:auto;height:auto;line-height:1.4;padding:3px 9px;font-size:12px" href="${m.src}" download="${m.name}">⬇ 下载</a></div>`;
   return `<div class="thumb"><img src="${m.src}" loading="lazy" onclick="zoom('${m.src}','${m.name}')"><a class="dl" href="${m.src}" download="${m.name}" onclick="event.stopPropagation()">⬇</a></div>`;}
 function opt(list,val){return list.map(o=>{const v=typeof o==='string'?o:o.id;const lab=typeof o==='string'?o:`${o.id}（~${o.price}元/张）`;return `<option value="${v}"${v===val?' selected':''}>${lab}</option>`;}).join('');}
-function setBox(it){const o=S.options;
+function setBox(it,locked){const o=S.options;const dis=locked?' disabled':'';
   if(CUR==='exports')return '';   // 导出无生成参数（顺序见上方，画幅取全局）
   if(CUR==='clips'){const res=(it[VMODE]||{}).resolution||(VMODE==='sample'?S.config.video.resolution_sample:S.config.video.resolution_final);
     return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 ${VMODE==='sample'?'样片':'成片'}生成设置（覆盖全局）</div><div class="sgrid">
-    <label>模型<select data-f="model">${opt(o.video_models,it.model||S.config.video.model)}</select></label>
-    <label>分辨率<select data-f="resolution">${opt(o.resolutions,res)}</select></label>
-    <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
-    <label>时长(秒)<input type="number" data-f="duration" min="4" max="15" value="${it.duration||5}"></label>
+    <label>模型<select data-f="model"${dis}>${opt(o.video_models,it.model||S.config.video.model)}</select></label>
+    <label>分辨率<select data-f="resolution"${dis}>${opt(o.resolutions,res)}</select></label>
+    <label>画幅<select data-f="ratio"${dis}>${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
+    <label>时长(秒)<input type="number" data-f="duration" min="4" max="15" value="${it.duration||5}"${dis}></label>
   </div></div>`;}
   return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 本图生成设置（覆盖全局）</div><div class="sgrid">
-    <label>模型<select data-f="model">${opt(o.image_models,it.model||S.config.image.model)}</select></label>
-    <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
+    <label>模型<select data-f="model"${dis}>${opt(o.image_models,it.model||S.config.image.model)}</select></label>
+    <label>画幅<select data-f="ratio"${dis}>${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
   </div></div>`;}
 
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
@@ -291,26 +293,32 @@ function cardHTML(it){const isClip=CUR==='clips', isExport=CUR==='exports';
   else if(st==='draft') mediaArea=`<div class="skeleton">（${isClip?(VMODE==='sample'?'待出样片 · 点「生成样片」':'待出成片 · 点「生成成片」'):'待生成 · 确认后点「生成」'}）</div>`;
   else{const m=media.map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
     mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
-  const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button></div>`).join('');
-  const editBlock=isExport?`<div class="lbl">拼接顺序（${(it.order||[]).length} 段 · 由 AI 按剧情排定）</div><div class="cmsg" style="font-family:inherit;color:var(--mut)">${(it.order||[]).map(esc).join(' → ')||'（未指定，请让 AI 排定）'}</div>`
-    :`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${esc(it.prompt)}</textarea>
-    <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
   const okOn=it.decision!=='需修改';
   const busy=(st==='running'||st==='queued');
+  const locked=busy;
+  const dis=locked?' disabled':'';
   const gw=isClip?(VMODE==='sample'?'样片':'成片'):'';
   const stopBtn=busy?`<button class="btn ghost sm" onclick="stopOne(this)">⏹ 停止</button>`:'';
   const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':isClip?'生成'+gw:'生成'}</button>`
     :st==='failed'||st==='canceled'?`<button class="btn regen" onclick="regen(this)">↻ ${isExport?'重试导出':isClip?'重试'+gw:'重试'}</button>`
     :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':isClip?'重出'+gw:'重新生成这一张'}</button>`;
+  const rxBtn=locked?'':`<button class="rx" onclick="removeRef(this)">✕</button>`;
+  const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')">${rxBtn}</div>`).join('');
+  const refActions=locked?'':`<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label>`;
+  const editBlock=isExport?`<div class="lbl">拼接顺序（${(it.order||[]).length} 段 · 由 AI 按剧情排定）</div><div class="cmsg" style="font-family:inherit;color:var(--mut)">${(it.order||[]).map(esc).join(' → ')||'（未指定，请让 AI 排定）'}</div>`
+    :`<div class="lbl">生图提示词${locked?'（生成中不可改）':'（可改）'}</div><textarea data-f="prompt"${dis}>${esc(it.prompt)}</textarea>
+    <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}${refActions}</div>`;
   return `<div class="card ${cls}" data-id="${it.id}">
     <div class="ch"><h3>${esc(it.title)}</h3>${it.meta?`<span class="pill" title="${escA(it.meta)}">${esc(it.meta)}</span>`:''}${badge}</div>
     ${statHTML(ct)}
     ${mediaArea}
+    <div class="card-edits${locked?' locked':''}">
     ${editBlock}
-    ${setBox(it)}
+    ${setBox(it,locked)}
+    </div>
     <div class="foot">
-      <div class="seg"><button class="ok${okOn?' on':''}" onclick="decide(this,'通过')">✓ 通过</button><button class="no${!okOn?' on':''}" onclick="decide(this,'需修改')">✎ 需修改</button></div>
-      <input class="note" type="text" data-f="note" placeholder="意见（可留空）" value="${escA(it.note)}">
+      <div class="seg"><button class="ok${okOn?' on':''}" onclick="decide(this,'通过')"${dis}>✓ 通过</button><button class="no${!okOn?' on':''}" onclick="decide(this,'需修改')"${dis}>✎ 需修改</button></div>
+      <input class="note" type="text" data-f="note" placeholder="意见（可留空）" value="${escA(it.note)}"${dis}>
       ${stopBtn}${action}
     </div></div>`;}
 
@@ -326,7 +334,7 @@ function mergeTaskSpec(it){   // 已在 state 里的卡片：在途任务 spec �
   if(!t||!t.spec||!['draft','queued','running','failed','canceled'].includes(t.status))return it;
   const s=t.spec,m=Object.assign({},it);
   TASK_OVERLAY_FIELDS.forEach(f=>{if(s[f]!=null&&s[f]!=='')m[f]=s[f];});
-  if(Array.isArray(s.references))m.references=s.references.slice();
+  if(Array.isArray(s.references)&&['draft','failed','canceled'].includes(t.status))m.references=s.references.slice();
   return m;}
 function renderCards(){const items=(S.items[CUR]||[]).slice().map(mergeTaskSpec);
   const ids=new Set(items.map(it=>it.id));
@@ -386,10 +394,10 @@ async function pickFile(path){if(!PICK_CARD){closePicker();return;}
   const res=await saveReferences(PICK_CARD);
   renderCards();toast(res?'已添加参考图：'+path:'添加失败');}
 async function removeRef(btn){const d=btn.closest('.ref');if(!d)return;
-  if(d.dataset.added==='1'){const card=btn.closest('.card');const id=card&&card.dataset.id;const img=d.querySelector('img');
+  const card=btn.closest('.card');
+  if(d.dataset.added==='1'){const id=card&&card.dataset.id;const img=d.querySelector('img');
     const arr=PENDING[id]||[];const i=img?arr.indexOf(img.getAttribute('src')):-1;if(i>=0)arr.splice(i,1);}
   d.remove();
-  const card=btn.closest('.card');
   if(card){await saveReferences(card);renderCards();}}
 const PENDING={};
 function addImageFile(card,f){if(!card||!f)return;const id=card.dataset.id;PENDING[id]=PENDING[id]||[];
