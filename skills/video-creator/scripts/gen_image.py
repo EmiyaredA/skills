@@ -37,30 +37,31 @@ _MOCK_PNG = bytes.fromhex(
 # 场景图后缀：强制空镜，避免模型自作主张往场景里塞人物（场景=环境，人物留给分镜）
 SCENE_SUFFIX = "。【空镜场景：只表现环境、布景、道具与光线，画面中不要出现任何人物、角色或人影】"
 
-# 人设三视图默认模板（结构要求）；默认 Q 版画风见 CHARACTER_SHEET_STYLE_DEFAULT
+# 人设三视图默认模板（官方设定资料卡式排版，仅结构与输出约束）
 CHARACTER_SHEET_BODY = (
-    "第一排横向展示完整三视图：正面、侧面、背面，全身站姿，比例一致。"
-    "三张视图必须是同一个角色，保持相同的脸型、发型、发色、眼睛颜色、体型、"
-    "服装结构、服装颜色、鞋子和配饰。"
-    "使用干净白色背景或浅灰背景，平面均匀光照，轻微阴影，禁止复杂背景。"
-    "不要添加文字，不要水印，不要多余人物，不要改变服装设计。"
+    "整体为官方设定资料卡式排版：白色背景，分区清晰、布局有条理，设定集插画资料风格，"
+    "平面均匀光照，轻微阴影，禁止复杂场景背景。"
+    "第一区横向陈列完整三视图：正面、侧面、背面全身站姿，比例一致。"
+    "第二区展示同一角色的面部表情变化（如平静、微笑、惊讶等，保持同一脸型、发型与发色）。"
+    "第三区分解陈列服装与装备细节（外衣、内搭、鞋帽、配饰、道具等各部位拆分展示，"
+    "颜色与材质与主视图一致）。"
+    "全图必须是同一个原创角色，脸型、发型、发色、眼睛颜色、体型、服装结构、颜色、"
+    "鞋子和配饰在各分区保持一致。"
+    "不要添加文字，不要水印，不要多余无关人物，不要擅自改动服装设计。"
 )
-CHARACTER_SHEET_STYLE_DEFAULT = "角色为二次元Q版风格，精致手办质感，软萌比例，线条干净。"
 
 VIEW_SUFFIX = {
-    "front": "正面全身站姿，角色面向镜头，同一原创角色，白/浅灰背景，平面均匀光照，无文字无水印",
-    "side": "正侧面全身站姿，同一角色同样服装与配饰，白/浅灰背景，平面均匀光照，无文字无水印",
-    "back": "背面全身站姿，同一角色同样服装与配饰，白/浅灰背景，平面均匀光照，无文字无水印",
+    "front": "正面全身站姿，角色面向镜头，同一原创角色，白底设定资料卡分区，平面均匀光照，无文字无水印",
+    "side": "正侧面全身站姿，同一角色同样服装与配饰，白底设定资料卡分区，平面均匀光照，无文字无水印",
+    "back": "背面全身站姿，同一角色同样服装与配饰，白底设定资料卡分区，平面均匀光照，无文字无水印",
 }
 
 
-def character_sheet_suffix(has_reference, project_style=""):
-    """人设合图后缀：有参考图时强调「同一原创角色」；未设 config.style 时追加默认 Q 版画风。"""
-    intro = ("根据参考图生成同一原创角色的角色设定三视图。"
-             if has_reference else "生成原创角色的角色设定三视图。")
-    style = (project_style or "").strip()
-    tail = CHARACTER_SHEET_STYLE_DEFAULT if not style else ""
-    return f"{intro}要求：{CHARACTER_SHEET_BODY}{tail}"
+def character_sheet_suffix(has_reference):
+    """人设合图后缀：设定资料卡式布局与一致性约束；具体画风由参考图 / prompt / config.style 决定。"""
+    intro = ("基于参考图，为同一原创角色制作官方设定资料卡式角色设定图。"
+             if has_reference else "为原创角色制作官方设定资料卡式角色设定图。")
+    return f"{intro}要求：{CHARACTER_SHEET_BODY}"
 
 
 def _emit(msg, on_log=None):
@@ -170,10 +171,7 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
         three = {}
         gender_s = f"，{gender}" if gender else ""
         for v in view_list:
-            vsuf = VIEW_SUFFIX.get(v, "")
-            if not style:
-                vsuf += CHARACTER_SHEET_STYLE_DEFAULT
-            vprompt = f"{prompt}{gender_s}{style_note}。{vsuf}"
+            vprompt = f"{prompt}{gender_s}{style_note}。{VIEW_SUFFIX.get(v, '')}"
             dest = os.path.join(outdir, f"{item_id}_{v}.png")
             gen_one(model, pu.apply_style(vprompt, style), size, reference_img, seed, dest, mock, use_async)
             three[v] = os.path.relpath(dest, project)
@@ -185,7 +183,7 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
         if img_type == "character":
             gender_s = f"，{gender}" if gender else ""
             gen_prompt = (f"{prompt}{gender_s}{style_note}。"
-                          f"{character_sheet_suffix(bool(abs_refs), style)}")
+                          f"{character_sheet_suffix(bool(abs_refs))}")
             ratio = ratio or "16:9"
             size = sa.pick_size(model, ratio)
         elif img_type == "scene":

@@ -11,8 +11,8 @@
 
 ## 登场人物（逐个）
 - 姓名、年龄、性别、身份
-- 外观锚点：无参考图时写入 plan `prompt`（越具体越好）；**有参考图时 prompt 从简**（外观交给参考图，只写 gender/build/改动点；三视图构图/Q 版由 [character-sheet.md](character-sheet.md) 自动追加）
-- 用户若要求其他画风（如实写、3D）或与默认 Q 版冲突 → 以用户为准，写入 `config.style` 或 `prompt`
+- 外观锚点：无参考图时写入 plan `prompt`（身份 + 按需画风/表情/装备要点）；**有参考图时 prompt 从简**；资料卡布局由 [character-sheet.md](character-sheet.md) 自动追加
+- 全片画风：写入 `config.style` 或在各角色 `prompt` 中说明
 - `build`（身高/体型，如「娇小，比男主矮一头」）写入角色任务字段
 - 是否有参考图（用户在角色卡片上传，或 `save_ref.py` 落盘到 `assets/refs/`）
 

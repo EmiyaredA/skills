@@ -47,7 +47,7 @@ license: Complete terms in LICENSE.txt
 
 | 阶段 | 任务 | 要点 |
 |------|------|------|
-| 1 设定 | `characters` + `scenes` | 人设默认 [character-sheet.md](templates/character-sheet.md) 模板（单张合图，勿默认 `--views`）；无参考图时 `prompt` 写身份锚点，**有参考图时 prompt 从简**；`gender`/`build`/`style_ref`；场景空镜无人物 |
+| 1 设定 | `characters` + `scenes` | 人设默认 [character-sheet.md](templates/character-sheet.md) 设定资料卡模板（三视图+表情+服装分解；单张合图）；无参考图时 `prompt` 写身份锚点，**有参考图时从简**；`gender`/`build`/`style_ref`；场景空镜无人物 |
 | 2 分镜 | `shots` | 1 shot ≈ 1 硬切镜头；带 `characters`/`scene`；参考图自动注入 |
 | 3 视频 | `clips` | 参考分镜+角色图；样片/成片分子页独立保留；不写 `sample` 进 plan |
 | 4 导出 | `exports` | 按 `order` 硬切拼接；需 ffmpeg（见「环境依赖」） |
@@ -80,7 +80,7 @@ python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 
 ## 阶段 1：人设 + 场景
 
-用 brief 对齐需求。人设图默认按 [templates/character-sheet.md](templates/character-sheet.md) 生成（脚本自动追加三视图/Q 版等要求；用户另有画风需求且与模板冲突时以用户为准）。参考图**必须对应正确角色**（逐张确认，或让用户在角色卡片上传）。plan 只放 `characters` + `scenes`。可先备 `shots`/`clips` 草稿预览全貌，**生成仍按阶段门控**。
+用 brief 对齐需求。人设图默认按 [templates/character-sheet.md](templates/character-sheet.md) 生成官方设定资料卡（三视图、表情变化、服装分解、白底排版；画风由参考图 / `prompt` / `config.style` 决定）。参考图**必须对应正确角色**（逐张确认，或让用户在角色卡片上传）。plan 只放 `characters` + `scenes`。可先备 `shots`/`clips` 草稿预览全貌，**生成仍按阶段门控**。
 
 ## 阶段 2：分镜
 
@@ -142,6 +142,6 @@ python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 
 - [references/senseaudio-api.md](references/senseaudio-api.md) — API、价格
 - [references/generation-modes.md](references/generation-modes.md) — 视频模式
-- [templates/character-sheet.md](templates/character-sheet.md) — 人设三视图默认模板
+- [templates/character-sheet.md](templates/character-sheet.md) — 人设设定资料卡默认模板（三视图+表情+服装分解）
 - [references/prompting-guide.md](references/prompting-guide.md) — 提示词、clip 拆分、一致性
 - [templates/brief.md](templates/brief.md) — 阶段1 对齐清单
