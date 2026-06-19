@@ -849,7 +849,7 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
 <div class="toast" id="toast"></div>
 
 <script>
-let S=null, CUR=null, TASK={}, TOTS=null;
+let S=null, CUR=null, TASK={}, TOTS=null, POLL_T=null;
 const $=s=>document.querySelector(s);
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2600);}
 function zoom(src,name){$('#lbimg').src=src;const d=$('#lbdl');d.href=src;d.download=name||'image';$('#lb').classList.add('show');}
@@ -1021,9 +1021,13 @@ function cardFields(card){const o={};card.querySelectorAll('[data-f]').forEach(e
 async function regen(btn){const card=btn.closest('.card');const id=card.dataset.id;const f=cardFields(card);
   const res=await api('/api/regenerate',Object.assign({category:CUR,id},f));
   if(!res.ok){toast('入队失败');return;}
-  PENDING[id]=[];toast('已加入生成队列：'+id);poll();}
+  PENDING[id]=[];toast('已加入生成队列：'+id);
+  const k=tkey(CUR,id),old=TASK[k]||{};                  // 乐观更新：立刻把卡片标成「排队中」，不等下一次轮询
+  TASK[k]=Object.assign({},old,res.task||{status:'queued'},{category:CUR,item_id:id,spec:old.spec||f});
+  renderCards();poll(true);}                               // 强制重渲染（即使有输入框聚焦），再轮询看实时进度
 
-async function poll(){let r=null;
+async function poll(force){let r=null;
+  if(POLL_T){clearTimeout(POLL_T);POLL_T=null;}   // 保证全程只有一条轮询链，避免每次手动 poll() 叠加成轮询风暴
   try{
     r=await api('/api/tasks');
     const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);TOTS=r.totals;
@@ -1036,12 +1040,12 @@ async function poll(){let r=null;
     const sig=r.tasks.filter(t=>t.category===CUR).map(t=>t.item_id+':'+t.status+':'+(t.progress||'')+':'+(t.message||'')).join('|')
       +'#'+(S.items[CUR]||[]).map(it=>it.id).join(',');
     const changed=sig!==poll._last;poll._last=sig;
-    // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）
+    // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）；显式操作（force）则无视聚焦立即重渲染
     const ae=document.activeElement;
-    const editing=ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
-    if((changed||justFinished||keysetChanged)&&!editing)renderCards();
+    const editing=!force&&ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
+    if((changed||justFinished||keysetChanged||force)&&!editing)renderCards();
   }catch(e){/* 任何异常都不能中断轮询循环 */}
-  setTimeout(poll, (r&&r.generating)?1200:1800);   // 持续轮询：看进度 + 接住 AI 推送的草稿/参考图
+  POLL_T=setTimeout(poll, (r&&r.generating)?1200:1800);   // 持续轮询：看进度 + 接住 AI 推送的草稿/参考图
 }
 function curStageCats(){const stg=(S.stages||[]).find(x=>x.cats.includes(CUR));return stg?stg.cats:[CUR];}
 function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
@@ -1057,8 +1061,8 @@ function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
     if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败，可在卡片上「重试」`;}}
 }
 async function generateAll(){const r=await api('/api/generate',{categories:curStageCats()});
-  toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll();}
-async function stopAll(){await api('/api/stop',{});toast('已请求停止：排队任务取消，当前任务跑完即停');poll();}
+  toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll(true);}
+async function stopAll(){await api('/api/stop',{});toast('已请求停止：排队任务取消，当前任务跑完即停');poll(true);}
 async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;
   try{await api('/api/shutdown',{});}catch(e){}
   document.body.innerHTML='<div style="height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--mut);gap:8px;text-align:center;padding:40px"><div style="font-size:34px">⏻</div><div style="color:var(--ink);font-size:16px;font-weight:600">本地服务已关闭</div><div style="font-size:13.5px">可以关闭此标签页了。需要时在对话里让我重新打开创作台即可。</div></div>';}
