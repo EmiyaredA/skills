@@ -6,7 +6,7 @@ description: >-
   适用于 AI 短剧、AI 视频生成、分镜、角色设计、视频续写/续接等场景。
   即使用户未明确说「skill」，只要想做 AI 短剧/视频就应使用本 skill。
 homepage: https://senseaudio.cn
-metadata: {"audioclaw":{"emoji":"🎬","homepage":"https://senseaudio.cn","requires":{"bins":["python3"],"env":["SENSEAUDIO_API_KEY"]},"primaryEnv":"SENSEAUDIO_API_KEY"}}
+metadata: {"audioclaw":{"emoji":"🎬","homepage":"https://senseaudio.cn","requires":{"bins":["python3"],"env":["SENSEAUDIO_API_KEY"]},"primaryEnv":"SENSEAUDIO_API_KEY","optionalBins":["ffmpeg"]}}
 license: Complete terms in LICENSE.txt
 ---
 
@@ -148,6 +148,16 @@ license: Complete terms in LICENSE.txt
 
 **默认值：** 样片 480p / 5s；成片 720p 起步，1080p 用于定稿镜头。竖屏短剧 `ratio=9:16`。
 
+## 阶段 4：导出成片（把片段按剧情顺序拼成整片）
+
+所有视频片段确认后，可把它们**按剧情时间顺序拼接导出**成一条完整成片（应用左侧「成片导出」类目，阶段4；需要用户机器装了 ffmpeg）。
+- **你（AI）按用户需求/剧情排定播放顺序**，`POST /api/plan` 备一条 `exports` 任务（草稿）：`order` 是 clip id 的有序列表（决定拼接先后），只放已生成的 clip。
+- 用户在「成片导出」分类点「**合成导出**」触发；后端 `concat_clips.py` 把各段归一化到统一画幅/帧率/音轨（兼容样片+成片混排）再无损拼接，完成后卡片里可预览/下载。
+- 想换顺序/增删片段：你改 `order` 再推一条（或用户让你重排），点「重新导出」即可。
+```bash
+curl -s http://127.0.0.1:<端口>/api/plan -d '{"tasks":[{"category":"exports","id":"export_01","title":"完整成片","order":"clip_01,clip_02,clip_03"}]}'
+```
+
 ## plan.json 形如
 
 字段对应 `gen_*.py` 参数；参考图字段统一用 **`references`（数组）**（写成单数 `reference` 也会被归一）：
@@ -156,7 +166,8 @@ license: Complete terms in LICENSE.txt
   {"category":"characters","id":"char_01","name":"林夏","prompt":"…身份锚点+外观+体型…","gender":"女","build":"娇小，比男主矮一头"},
   {"category":"scenes","id":"scene_01","name":"便利店","prompt":"…只写环境，无人物…"},
   {"category":"shots","id":"shot_01","prompt":"中景，两人在玄关对话；男主比女主高约一头","characters":"char_01,char_02","scene":"scene_01"},
-  {"category":"clips","id":"clip_01","prompt":"…镜头动作+比例…","characters":"char_01,char_02","shots":"shot_01","resolution":"480p","duration":5,"sample":true}
+  {"category":"clips","id":"clip_01","prompt":"…镜头动作+比例…","characters":"char_01,char_02","shots":"shot_01","resolution":"480p","duration":5,"sample":true},
+  {"category":"exports","id":"export_01","title":"完整成片","order":"clip_01,clip_02,clip_03"}
 ]}
 ```
 
@@ -181,6 +192,7 @@ license: Complete terms in LICENSE.txt
 | 生成样片（480p 最省） | `python scripts/gen_video.py --project "$P" --id clip_01 --sample --prompt "..." --shots shot_01 --characters char_01 --duration 5` |
 | 生成成片 | `… --id clip_01 --resolution 1080p --prompt "..." --shots shot_01 --characters char_01 --duration 8` |
 | 成本预估 | `python scripts/estimate_cost.py --project "$P"` |
+| 导出成片（按序拼接，需 ffmpeg） | `python scripts/concat_clips.py --project "$P" --id export_01 --ids clip_01,clip_02,clip_03 --title 成片`（一般写进 `exports` plan 任务由应用触发） |
 
 ## 项目结构（总目录固定，每轮对话一个隔离子目录）
 

@@ -124,6 +124,7 @@ def default_state(title=""):
         "scenes": [],
         "shots": [],        # 分镜/机位
         "clips": [],        # 已生成或待生成的视频片段
+        "exports": [],      # 成片导出（按序拼接的整片）
         "history": [],      # 操作日志
     }
 
