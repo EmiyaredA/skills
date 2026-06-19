@@ -13,13 +13,14 @@
   GET  /                 单页应用（侧边栏[按三阶段分组] + 卡片 + 进度 + 设置面板）
   GET  /api/state        全量状态：分类、各分类条目、阶段、配置、可选模型/画幅/分辨率
   GET  /api/tasks        生成任务队列与进度（前端轮询）
+  GET  /api/files        列出工作目录内可选的参考图（供卡片「📁 目录」选图）
   GET  /media?path=rel   流式返回项目内的图片/音频/视频（带防越权校验）
   POST /api/config       深合并配置并落盘（实时生效）
   POST /api/key          保存 API Key 到 .sa_key
   POST /api/decision     保存某条目的「通过/需修改」+ 意见
-  POST /api/regenerate   按本条目编辑后的提示词/参考图/模型/设置重新生成（入队）
-  POST /api/retry        用原始计划参数重试某失败任务（入队）
-  POST /api/plan         把一批新任务推进运行中的服务（助手续作下一阶段用）
+  POST /api/regenerate   按本条目编辑后的提示词/参考图/模型/设置重新生成（入队；失败卡片的「重试」也走这里）
+  POST /api/plan         把一批新任务备为「待生成」草稿（助手续作下一阶段用）
+  POST /api/generate     把「待生成」草稿转入队列开始生成（用户在 UI 点「开始生成」）
   POST /api/stop         停止：取消所有排队任务（当前任务跑完即停）
   POST /api/shutdown     关停本地服务
 
@@ -239,13 +240,6 @@ class GenQueue:
         if n:
             self._ensure_workers()
         return n
-
-    def retry(self, category, iid):
-        k = f"{category}::{iid}"
-        spec = self.specs.get(k)
-        if spec:
-            return self.enqueue(dict(spec), start=True)
-        return None
 
     def stop(self):
         with self.lock:
@@ -609,10 +603,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/regenerate":
             self._enqueue_edit(body)
-            return
-        if parsed.path == "/api/retry":
-            t = self.gq.retry(body.get("category"), body.get("id"))
-            self._send_json({"ok": bool(t), "task": t})
             return
         if parsed.path == "/api/stop":
             self.gq.stop()
@@ -1060,7 +1050,7 @@ function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
   gen.textContent=`▶ 开始生成（${sd}）`;
   if(r.generating){pb.classList.remove('hide');
     $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.failed?' / '+t.failed+' 失败':''}`;
-    $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-drafts)*100):0)+'%';
+    $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-t.draft)*100):0)+'%';
     $('#pcost').textContent='~'+r.cost_total+' 元';}
   else{pb.classList.add('hide');
     if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败，可在卡片上「重试」`;}}
