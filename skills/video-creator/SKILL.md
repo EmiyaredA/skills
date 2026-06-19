@@ -47,7 +47,7 @@ license: Complete terms in LICENSE.txt
 
 | 阶段 | 任务 | 要点 |
 |------|------|------|
-| 1 设定 | `characters` + `scenes` | 人设默认 [character-sheet.md](templates/character-sheet.md) 模板（单张合图，勿默认 `--views`）；`prompt` 只写身份锚点；`gender`/`build`/`style_ref`；场景空镜无人物 |
+| 1 设定 | `characters` + `scenes` | 人设默认 [character-sheet.md](templates/character-sheet.md) 模板（单张合图，勿默认 `--views`）；无参考图时 `prompt` 写身份锚点，**有参考图时 prompt 从简**；`gender`/`build`/`style_ref`；场景空镜无人物 |
 | 2 分镜 | `shots` | 1 shot ≈ 1 硬切镜头；带 `characters`/`scene`；参考图自动注入 |
 | 3 视频 | `clips` | 参考分镜+角色图；样片/成片分子页独立保留；不写 `sample` 进 plan |
 | 4 导出 | `exports` | 按 `order` 硬切拼接；需 ffmpeg（见「环境依赖」） |

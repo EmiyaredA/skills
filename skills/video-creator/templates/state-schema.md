@@ -47,7 +47,7 @@ API Key **不**存在 config/state：环境变量 `SENSEAUDIO_API_KEY` 优先，
 
 ## characters[]（助手可写字段 + 系统填充）
 ```json
-{ "id": "char_01", "name": "林夏", "prompt": "身份锚点（外貌/服装；三视图模板见 character-sheet.md，脚本自动追加）",
+{ "id": "char_01", "name": "林夏", "prompt": "身份锚点（无参考图时写外貌/服装；有参考图时从简，见 character-sheet.md）",
   "gender": "女", "build": "娇小，比男主矮一头",
   "references": ["assets/refs/upload_char_01.png"],
   "three_view": { "sheet": "assets/characters/char_01.png" },

@@ -8,11 +8,14 @@
 
 **以 [templates/character-sheet.md](../templates/character-sheet.md) 为主**；`gen_image` 会在 `prompt` 后自动追加模板「要求」段。
 
-- **助手在 plan 里只写身份锚点**（外貌、服装、配饰等），不要重复模板里的三视图构图/背景/Q 版要求。
+- **助手在 plan 里写 `prompt`**：
+  - **无参考图**：写清身份锚点（外貌、服装、配饰等），不要重复模板里的三视图构图/背景/Q 版要求。
+  - **有参考图**（`references` / `--style-ref`）：**从简**——外观交给参考图，只写 `gender`/`build` 及与参考图不同的改动点，勿逐条复述发型服装颜色。
 - **用户有额外需求**：在 `prompt` 或 `config.style` 上补充即可。
 - **与模板冲突时以用户为准**（如用户要写实/3D 而非 Q 版）→ 写入 `config.style` 或 `prompt` 明确画风；未设 `config.style` 时脚本才追加默认「二次元 Q 版」句。
 
-示例 `prompt`：`成年女性，粉色长卷发，米色针织开衫配白衬衫与棕色长裤，温柔表情`
+示例（无参考图）`prompt`：`成年女性，粉色长卷发，米色针织开衫配白衬衫与棕色长裤，温柔表情`  
+示例（有参考图）`prompt`：`女`（`gender` 字段写 `女`；参考图由 `references` 传入）
 
 有参考图 / `--style-ref` 时，脚本开头自动用「根据参考图生成同一原创角色的…」并传参考图。
 
@@ -52,9 +55,9 @@
 python scripts/gen_image.py --project P --type character --id char_01 --name 女孩 --gender 女 \
     --prompt "粉色长卷发，米色针织开衫配白衬衫与棕色长裤，温柔表情"
 
-# 2) 男孩参考女孩出同款画风
+# 2) 男孩参考女孩出同款画风（有 style-ref，prompt 从简）
 python scripts/gen_image.py --project P --type character --id char_02 --name 男孩 --gender 男 \
-    --prompt "蓝色短发，米色毛衣配深蓝长裤" --style-ref char_01 --build "比女孩高一头"
+    --prompt "男，同参考画风" --style-ref char_01 --build "比女孩高一头"
 ```
 `--style-ref` 会把基准图作参考，并自动追加"与参考图保持同一画风"。`--gender` 写进身份锚点，**防止性别生成错**（如男主出成女生）。
 
