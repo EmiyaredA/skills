@@ -1,4 +1,6 @@
-"""生成图像资产：角色三视图 / 场景图 / 分镜机位图 / 角色入景合成图。
+"""生成图像资产：角色三视图 / 场景图 / 分镜机位图。
+
+分镜（shot）自动追加 storyboard-shot 强一致性模板；场景/角色见 environment-bible / character-sheet 模板。
 
 每次生成都会：下载图片到项目 assets/、更新 state.json、打印结果路径。
 
@@ -84,6 +86,32 @@ def character_sheet_suffix(has_reference):
     return f"{intro}要求：{CHARACTER_SHEET_BODY}"
 
 
+# 分镜机位图默认模板（强约束参考人设 + 场景一致性）
+STORYBOARD_SHOT_BODY = (
+    "本图是单幅电影分镜静帧（storyboard frame），不是角色设定资料卡，不是 Environment Bible 分格合图。"
+    "角色一致性：每个出场角色的脸型、发型、发色、瞳色、服装结构、颜色、配饰、身高体型必须与参考人设图完全一致，"
+    "不得增减角色、不得替换成他人、不得性别错配、不得服装或发型漂移。"
+    "场景一致性：空间布局、建筑结构、关键道具位置、材质、色调、时间天气与光线必须与参考场景图完全一致，"
+    "不得擅自改房间结构、换场景或替换标志性道具。"
+    "画风一致性：渲染风格、线条、上色方式与参考图保持同一世界观，禁止风格跳变。"
+    "构图：只呈现本 prompt 描述的单一机位与景别，人物动作与表情符合剧情；"
+    "画面内人物数量、身份与出场名单一致，多角色同框时各自可辨认、不可合并成同一人。"
+    "不要输出拼贴、分格、设定资料卡或场景 Bible 式排版；不要添加文字，不要水印。"
+)
+
+
+def storyboard_shot_suffix(has_reference, has_collage=False):
+    """分镜后缀：强约束与参考人设/场景一致；具体画风由参考图 / prompt / config.style 决定。"""
+    if has_collage:
+        intro = ("参考图是出场角色设定图与场景图的横向拼贴，请逐一对照各区域，"
+                 "严格依照参考人设与场景，生成完整单幅电影分镜静帧。")
+    elif has_reference:
+        intro = "严格依照参考的人设图与场景图，生成单幅电影分镜静帧。"
+    else:
+        intro = "为原创短剧生成单幅电影分镜静帧。"
+    return f"{intro}要求：{STORYBOARD_SHOT_BODY}"
+
+
 def _emit(msg, on_log=None):
     print(msg)
     if on_log:
@@ -165,15 +193,14 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
             abs_refs.append(rp)
 
     reference_img = abs_refs[0] if abs_refs else None
+    used_collage = False
     if img_type == "shot" and len(abs_refs) > 1 and not mock:
         local = [r for r in abs_refs if not r.startswith(("http://", "https://", "data:"))]
         if len(local) > 1:
             board = os.path.join(pu.subdir(project, "refs"), f"{item_id}_board.png")
             if sa.composite_reference(local, board):
                 reference_img = board
-                base_prompt += ("。【参考图是“出场角色设定图 + 场景图”的横向拼贴，"
-                                "请据此让每个角色的外观/服装/身高比例与各自设定一致、场景与设定一致；"
-                                "输出为完整的单幅镜头画面，不要输出拼贴或分格】")
+                used_collage = True
 
     cost = 0.0
 
@@ -212,7 +239,8 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
             gen_prompt = (f"{prompt}{style_note}。"
                           f"{environment_bible_suffix(bool(abs_refs))}")
         else:
-            gen_prompt = base_prompt
+            gen_prompt = (f"{base_prompt}。"
+                          f"{storyboard_shot_suffix(bool(abs_refs), used_collage)}")
         dest = os.path.join(outdir, f"{item_id}.png")
         gen_one(model, pu.apply_style(gen_prompt, style), size, reference_img, seed, dest, mock, use_async)
         rel = os.path.relpath(dest, project)

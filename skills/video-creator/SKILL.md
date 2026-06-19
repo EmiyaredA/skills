@@ -75,7 +75,7 @@ AI 短剧、AI 视频、分镜、角色设计，或分步预览确认后再生�
 | 阶段 | 任务 | 要点 |
 |------|------|------|
 | 1 | `characters` + `scenes` | [character-sheet.md](templates/character-sheet.md) · [environment-bible.md](templates/environment-bible.md)；有参考图时 prompt 从简 |
-| 2 | `shots` | 1 shot ≈ 1 硬切；带 `characters`/`scene` |
+| 2 | `shots` | 1 shot ≈ 1 硬切；带 `characters`/`scene`；模板 [storyboard-shot.md](templates/storyboard-shot.md) 强约束参考一致性 |
 | 3 | `clips` | 参考分镜+角色；样片/成片分子页；`duration` 推荐 5/10/15s |
 | 4 | `exports` | `order` 硬切拼接；需 ffmpeg |
 
@@ -114,5 +114,5 @@ AI 短剧、AI 视频、分镜、角色设计，或分步预览确认后再生�
 ## 延伸阅读
 
 - [senseaudio-api.md](references/senseaudio-api.md) · [generation-modes.md](references/generation-modes.md)
-- [character-sheet.md](templates/character-sheet.md) · [environment-bible.md](templates/environment-bible.md)
+- [character-sheet.md](templates/character-sheet.md) · [environment-bible.md](templates/environment-bible.md) · [storyboard-shot.md](templates/storyboard-shot.md)
 - [prompting-guide.md](references/prompting-guide.md) · [state-schema.md](templates/state-schema.md)

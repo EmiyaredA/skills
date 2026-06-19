@@ -8,7 +8,7 @@
 
 - **角色**：模板与 prompt 写法见 [character-sheet.md](../templates/character-sheet.md)
 - **场景**：模板与 prompt 写法见 [environment-bible.md](../templates/environment-bible.md)
-- **分镜**：写景别 + 机位 + 动作；带 `characters`/`scene` 字段
+- **分镜**：模板与 prompt 写法见 [storyboard-shot.md](../templates/storyboard-shot.md)；**务必**写 `characters` + `scene`，prompt 只写机位/动作/比例（外貌交给参考图）
 
 景别与机位词：远景/全景/中景/近景/特写；平视/俯拍/仰拍/过肩/手持/推轨/环绕。
 
