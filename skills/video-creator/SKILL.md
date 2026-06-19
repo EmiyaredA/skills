@@ -54,7 +54,7 @@ license: Complete terms in LICENSE.txt
 
 **参考图**：分镜/视频任务写 `characters`(+`scene`) 决定身份锚点；服务自动注入已完成阶段1/2 的图。多角色分镜无 Pillow 时回退单参考图。**比例**：`build` + 每条分镜/视频 prompt 显式写人物间、人与场景大小关系。**风格**：`config.style` 自动追加到每条 prompt。
 
-**clip 拆分（收到用户剧情必做）**：先拆多条独立 clip（通常 1 clip = 1 shot），阶段4 **硬切**拼接，**禁止**相邻 clip 设计成须丝滑衔接的连续长镜头。`duration` 规划时取 **5/10/15** 秒（写任务字段，不进 prompt；用户可在 UI 微调 4–15）。默认不用 `continue_prev`。详情见 [references/prompting-guide.md](references/prompting-guide.md)。
+**clip 拆分（收到用户剧情必做）**：先拆多条独立 clip（通常 1 clip = 1 shot），阶段4 **硬切**拼接。`duration` **推荐** 5/10/15 秒（API/UI 支持 4–15）。详情见 [references/prompting-guide.md](references/prompting-guide.md)。
 
 ## 续作
 
@@ -84,7 +84,7 @@ python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 
 ## 阶段 2：分镜
 
-每镜一张机位图，与 clip 一一对应。prompt 写景别/机位/动作/比例。详见 [references/generation-modes.md](references/generation-modes.md)。
+每镜一张机位图，与 clip 一一对应。prompt 写景别/机位/动作/比例。详见 [references/prompting-guide.md](references/prompting-guide.md) 图像/分镜章节。
 
 ## 阶段 3：视频
 
@@ -97,7 +97,7 @@ python3 scripts/serve_review.py --project "$P" --port 8765 --daemon
 ## plan.json 示例
 
 ```json
-{"tasks":[
+{"story":{"logline":"…","summary":"…","beats":["节拍1","节拍2"]},"tasks":[
   {"category":"characters","id":"char_01","name":"林夏","prompt":"…","gender":"女","build":"娇小"},
   {"category":"scenes","id":"scene_01","name":"便利店","prompt":"…只写环境…"},
   {"category":"shots","id":"shot_01","prompt":"中景…","characters":"char_01","scene":"scene_01"},

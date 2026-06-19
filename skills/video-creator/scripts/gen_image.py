@@ -44,11 +44,11 @@ VIEW_SUFFIX = {
     "sheet": "角色三视图设定集：同一画面内并排展示正面、正侧面、背面全身，纯色背景，统一光照",
 }
 
-TYPE_MAP = {
-    "character": ("characters", "assets/characters"),
-    "scene": ("scenes", "assets/scenes"),
-    "shot": ("shots", "assets/shots"),
-}
+
+def _emit(msg, on_log=None):
+    print(msg)
+    if on_log:
+        on_log(msg)
 
 
 def gen_one(model, prompt, size, reference, seed, dest, mock, use_async):
@@ -63,150 +63,170 @@ def gen_one(model, prompt, size, reference, seed, dest, mock, use_async):
     return sa.download(url, dest)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", required=True)
-    ap.add_argument("--type", required=True, choices=list(TYPE_MAP))
-    ap.add_argument("--id", required=True)
-    ap.add_argument("--name", default="")
-    ap.add_argument("--prompt", required=True)
-    ap.add_argument("--reference", default=None, help="参考图（本地路径或URL），保持一致性")
-    ap.add_argument("--style-ref", default=None, help="画风基准：另一角色 id 或图片路径；新角色参考它出同一画风（如男孩参考女孩出同款二次元3D）")
-    ap.add_argument("--gender", default=None, help="角色性别（character 用），写进身份锚点防止性别漂移")
-    ap.add_argument("--scene", default=None, help="shot 所属场景 id；自动把场景图作参考")
-    ap.add_argument("--characters", default=None, help="shot 出场角色 id，逗号分隔；自动注入角色锚点+参考图")
-    ap.add_argument("--views", default=None, help="角色分张出图，逗号分隔：front,side,back")
-    ap.add_argument("--ratio", default=None, help="覆盖项目默认画幅")
-    ap.add_argument("--model", default=None)
-    ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--async-hd", action="store_true", help="高分辨率用异步接口")
-    ap.add_argument("--mock", action="store_true")
-    args = ap.parse_args()
-
-    state = pu.load_state(args.project)
-
-    pu.use_project_key(args.project)
-    if args.mock:
-        print("⚠ MOCK：仅供 selftest 自检，写占位文件，切勿作为成品交付。")
+def run_image_generation(project, *, img_type, item_id, prompt, name="", reference=None,
+                         style_ref=None, gender=None, build=None, scene=None, characters=None,
+                         views=None, ratio=None, model=None, seed=None, async_hd=False,
+                         mock=False, on_log=None):
+    """生成图像并更新 state。成功返回 None，失败抛出 sa.APIError。"""
+    state = pu.load_state(project)
+    pu.use_project_key(project)
+    if mock:
+        _emit("⚠ MOCK：仅供 selftest 自检，写占位文件，切勿作为成品交付。", on_log)
     else:
-        pu.require_key(args.project)
+        pu.require_key(project)
+
+    if img_type not in pu.IMAGE_TYPE_KEYS:
+        raise ValueError(f"未知 type: {img_type}")
+
     cfg = state["config"]
     img_cfg = cfg.get("image", {})
-    ratio = args.ratio or cfg["ratio"]
-    model = args.model or img_cfg.get("model") or sa.DEFAULT_IMAGE_MODEL
-    use_async = args.async_hd or img_cfg.get("use_async", False)
-    style = (cfg.get("style") or "").strip()   # 项目级视觉风格（设置面板里改），追加到每条提示词保持全片统一
-
-    def with_style(p):
-        return f"{p}。【整体视觉风格：{style}，全片统一】" if style else p
+    ratio = ratio or cfg["ratio"]
+    model = model or img_cfg.get("model") or sa.DEFAULT_IMAGE_MODEL
+    use_async = async_hd or img_cfg.get("use_async", False)
+    style = (cfg.get("style") or "").strip()
 
     size = sa.pick_size(model, ratio)
-    key, subdir = TYPE_MAP[args.type]
-    outdir = os.path.join(args.project, subdir)
+    key = pu.IMAGE_TYPE_KEYS[img_type]
+    outdir = pu.subdir(project, key)
     os.makedirs(outdir, exist_ok=True)
-    seed = args.seed if args.seed is not None else abs(hash(args.id)) % 2_000_000
+    seed = seed if seed is not None else abs(hash(item_id)) % 2_000_000
 
-    # 分镜：自动注入出场角色的身份锚点（防性别/服装漂移）+ 自动选参考图
-    char_ids = [c.strip() for c in args.characters.split(",")] if args.characters else []
-    scene_id = args.scene
-    base_prompt = args.prompt
-    # --reference 现在可传多张（逗号分隔）：分镜会把"各角色设定图 + 场景图"一并参考
-    refs = [r.strip() for r in args.reference.split(",")] if args.reference else []
+    char_ids = pu.parse_id_list(characters)
+    scene_id = scene
+    base_prompt = prompt
+    refs = [r.strip() for r in reference.split(",")] if reference else []
+
+    if not refs and img_type == "shot":
+        spec = {"characters": characters, "scene": scene, "references": []}
+        pu.resolve_generation_refs(state, "shots", spec)
+        refs = spec.get("references") or []
+        if not char_ids:
+            char_ids = pu.parse_id_list(spec.get("characters"))
+
     style_note = ""
-    if args.type == "character":
-        if not refs and args.style_ref:
-            refs = [pu.character_image(state, args.style_ref) or args.style_ref]
+    if img_type == "character":
+        if not refs and style_ref:
+            refs = [pu.character_image(state, style_ref) or style_ref]
         if refs:
             style_note = "，与参考图保持同一画风（统一渲染风格、同一世界观）"
-    if args.type == "shot":
+    if img_type == "shot":
         anchor = pu.character_anchor(state, char_ids)
         if anchor:
-            base_prompt = anchor + "镜头：" + args.prompt
-        if not refs:
-            # 缺省：出场角色设定图（全部）+ 场景图，供拼贴参考
-            refs = [pu.character_image(state, c) for c in char_ids]
-            refs.append(pu.scene_image(state, scene_id))
-    # 解析到项目目录下的绝对路径，去掉空值/重复
+            base_prompt = anchor + "镜头：" + prompt
+
     seen, abs_refs = set(), []
     for r in refs:
         if not r:
             continue
-        rp = r if r.startswith(("http://", "https://", "data:", "/")) else os.path.join(args.project, r)
+        rp = pu.resolve_asset_path(project, r)
         if rp not in seen:
             seen.add(rp)
             abs_refs.append(rp)
-    # 图像 API 只接受单张参考图：多张时（分镜多角色+场景）拼成一张「参考拼贴」一起参考
-    reference = abs_refs[0] if abs_refs else None
-    if args.type == "shot" and len(abs_refs) > 1 and not args.mock:
+
+    reference_img = abs_refs[0] if abs_refs else None
+    if img_type == "shot" and len(abs_refs) > 1 and not mock:
         local = [r for r in abs_refs if not r.startswith(("http://", "https://", "data:"))]
         if len(local) > 1:
-            board = os.path.join(args.project, "assets/refs", f"{args.id}_board.png")
+            board = os.path.join(pu.subdir(project, "refs"), f"{item_id}_board.png")
             if sa.composite_reference(local, board):
-                reference = board
+                reference_img = board
                 base_prompt += ("。【参考图是“出场角色设定图 + 场景图”的横向拼贴，"
                                 "请据此让每个角色的外观/服装/身高比例与各自设定一致、场景与设定一致；"
                                 "输出为完整的单幅镜头画面，不要输出拼贴或分格】")
 
     cost = 0.0
-    # 记录里存「来源参考图」列表（人设/场景的原图），而不是发给 API 的拼贴板——这样卡片能显示用到的每一张
-    def _rel(p):
-        return p if p.startswith(("http://", "https://", "data:")) else os.path.relpath(p, args.project)
-    src_refs = [_rel(r) for r in abs_refs]
-    record = {"id": args.id, "name": args.name, "prompt": args.prompt,
-              "reference": src_refs[0] if src_refs else None, "references": src_refs,
-              "model": model, "status": "draft"}
-    if args.gender:
-        record["gender"] = args.gender
 
-    if args.type == "character" and args.views:
-        views = [v.strip() for v in args.views.split(",") if v.strip()]
+    def _rel(p):
+        return p if p.startswith(("http://", "https://", "data:")) else os.path.relpath(p, project)
+
+    src_refs = [_rel(r) for r in abs_refs]
+    record = {"id": item_id, "name": name, "prompt": prompt,
+              "references": src_refs, "model": model, "status": "draft"}
+    if gender:
+        record["gender"] = gender
+    if build:
+        record["build"] = build
+
+    if img_type == "character" and views:
+        view_list = pu.parse_id_list(views) if isinstance(views, str) else list(views)
         three = {}
-        gender = f"，{args.gender}" if args.gender else ""
-        for v in views:
-            prompt = f"{args.prompt}{gender}{style_note}。{VIEW_SUFFIX.get(v, '')}"
-            dest = os.path.join(outdir, f"{args.id}_{v}.png")
-            gen_one(model, with_style(prompt), size, reference, seed, dest, args.mock, use_async)
-            three[v] = os.path.relpath(dest, args.project)
+        gender_s = f"，{gender}" if gender else ""
+        for v in view_list:
+            vprompt = f"{prompt}{gender_s}{style_note}。{VIEW_SUFFIX.get(v, '')}"
+            dest = os.path.join(outdir, f"{item_id}_{v}.png")
+            gen_one(model, pu.apply_style(vprompt, style), size, reference_img, seed, dest, mock, use_async)
+            three[v] = os.path.relpath(dest, project)
             cost += sa.estimate_image(model)
-            print(f"  ✓ {v}: {dest}")
+            _emit(f"  ✓ {v}: {dest}", on_log)
         record["three_view"] = three
         record["image"] = three.get("front") or next(iter(three.values()), None)
     else:
-        if args.type == "character":
-            gender = f"，{args.gender}" if args.gender else ""
-            prompt = f"{args.prompt}{gender}{style_note}。{VIEW_SUFFIX['sheet']}"
-            ratio = args.ratio or "16:9"
+        if img_type == "character":
+            gender_s = f"，{gender}" if gender else ""
+            gen_prompt = f"{prompt}{gender_s}{style_note}。{VIEW_SUFFIX['sheet']}"
+            ratio = ratio or "16:9"
             size = sa.pick_size(model, ratio)
-        elif args.type == "scene":
-            prompt = base_prompt + SCENE_SUFFIX
+        elif img_type == "scene":
+            gen_prompt = base_prompt + SCENE_SUFFIX
         else:
-            prompt = base_prompt
-        dest = os.path.join(outdir, f"{args.id}.png")
-        gen_one(model, with_style(prompt), size, reference, seed, dest, args.mock, use_async)
-        rel = os.path.relpath(dest, args.project)
+            gen_prompt = base_prompt
+        dest = os.path.join(outdir, f"{item_id}.png")
+        gen_one(model, pu.apply_style(gen_prompt, style), size, reference_img, seed, dest, mock, use_async)
+        rel = os.path.relpath(dest, project)
         record["image"] = rel
-        if args.type == "character":
+        if img_type == "character":
             record["three_view"] = {"sheet": rel}
         cost += sa.estimate_image(model)
-        print(f"  ✓ {dest}")
+        _emit(f"  ✓ {dest}", on_log)
 
-    if args.type == "shot":
+    if img_type == "shot":
         if scene_id:
             record["scene_id"] = scene_id
         if char_ids:
             record["characters"] = char_ids
-            print(f"  ↳ 已注入角色锚点：{','.join(char_ids)}；参考图：{reference or '(无)'}")
+            _emit(f"  ↳ 已注入角色锚点：{','.join(char_ids)}；参考图：{reference_img or '(无)'}", on_log)
 
     def _apply(st):
         items = st.setdefault(key, [])
-        ex = pu.find(items, args.id)
+        ex = pu.find(items, item_id)
         if ex:
             ex.update(record)
         else:
             items.append(record)
-        pu.log(st, f"生成 {args.type} 图像 {args.id}（model={model}, ~{cost:.2f}元）")
-    pu.update_state(args.project, _apply)   # 并发安全：重载最新 state 再写，避免并行生成互相覆盖
-    print(f"已更新 state.json（{args.type}={args.id}，参考成本 ~{cost:.2f}元）")
+        pu.log(st, f"生成 {img_type} 图像 {item_id}（model={model}, ~{cost:.2f}元）")
+
+    pu.update_state(project, _apply)
+    _emit(f"已更新 state.json（{img_type}={item_id}，参考成本 ~{cost:.2f}元）", on_log)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--type", required=True, choices=list(pu.IMAGE_TYPE_KEYS))
+    ap.add_argument("--id", required=True)
+    ap.add_argument("--name", default="")
+    ap.add_argument("--prompt", required=True)
+    ap.add_argument("--reference", default=None, help="参考图（本地路径或URL），保持一致性")
+    ap.add_argument("--style-ref", default=None, help="画风基准：另一角色 id 或图片路径")
+    ap.add_argument("--gender", default=None, help="角色性别（character 用）")
+    ap.add_argument("--build", default=None, help="身高/体型（character 用），如「娇小」「高挑」")
+    ap.add_argument("--scene", default=None, help="shot 所属场景 id")
+    ap.add_argument("--characters", default=None, help="shot 出场角色 id，逗号分隔")
+    ap.add_argument("--views", default=None, help="角色分张出图：front,side,back")
+    ap.add_argument("--ratio", default=None)
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--async-hd", action="store_true")
+    ap.add_argument("--mock", action="store_true")
+    args = ap.parse_args()
+
+    run_image_generation(
+        args.project, img_type=args.type, item_id=args.id, prompt=args.prompt,
+        name=args.name, reference=args.reference, style_ref=args.style_ref,
+        gender=args.gender, build=args.build, scene=args.scene,
+        characters=args.characters, views=args.views, ratio=args.ratio,
+        model=args.model, seed=args.seed, async_hd=args.async_hd, mock=args.mock,
+    )
 
 
 if __name__ == "__main__":

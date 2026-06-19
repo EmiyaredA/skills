@@ -53,27 +53,16 @@ import project_utils as pu
 import ensure_env as env
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RATIOS = ["16:9", "9:16", "4:3", "3:4", "1:1"]
-RESOLUTIONS = ["480p", "720p", "1080p"]
+SKILL_ROOT = os.path.dirname(HERE)
 PCT = re.compile(r"(\d{1,3})%")
 MAX_RETRIES = 3  # 失败/超时后自动重试次数（不含首次）
 
-CATEGORIES = [
-    {"key": "characters", "label": "角色三视图", "icon": "user", "kind": "image"},
-    {"key": "scenes", "label": "场景", "icon": "photo", "kind": "image"},
-    {"key": "shots", "label": "分镜机位", "icon": "clapperboard", "kind": "image"},
-    {"key": "clips", "label": "视频片段", "icon": "movie", "kind": "video"},
-    {"key": "exports", "label": "成片导出", "icon": "film", "kind": "video"},
-]
-# 生成阶段：阶段1(人设+场景) → 阶段2(分镜，用人设/场景图作参考) → 阶段3(视频) → 阶段4(导出)。
-# 队列按阶段门控：上一阶段全部结束前，不启动下一阶段——保证分镜/视频生成时参考图已存在。
-STAGE_OF = {"characters": 1, "scenes": 1, "shots": 2, "clips": 3, "exports": 4}
-STAGES = [
-    {"n": 1, "label": "设定", "cats": ["characters", "scenes"]},
-    {"n": 2, "label": "分镜", "cats": ["shots"]},
-    {"n": 3, "label": "成片", "cats": ["clips"]},
-    {"n": 4, "label": "导出", "cats": ["exports"]},
-]
+CATEGORIES = [{"key": c["key"], "label": c["label"], "icon": c["icon"], "kind": c["kind"]}
+              for c in pu.PIPELINE_CATEGORIES]
+STAGE_OF = pu.STAGE_OF
+STAGES = pu.STAGES
+RATIOS = pu.RATIOS
+RESOLUTIONS = pu.RESOLUTIONS
 # 用户在卡片上可直接改、并覆盖原始计划参数的字段
 EDITABLE = ("prompt", "model", "ratio", "resolution", "duration", "sample")
 
@@ -86,13 +75,21 @@ def _media_url(rel):
     return "/media?path=" + urllib.parse.quote(rel)
 
 
-def _ref_list(*vals):
-    out = []
-    for v in vals:
-        for r in (v if isinstance(v, list) else [v]):
-            if r and r not in out:
-                out.append(r)
-    return out
+def _load_index_html():
+    path = os.path.join(SKILL_ROOT, "templates", "review.html")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _refs(spec_or_item):
+    """读取 references 列表（兼容 state 里遗留的 reference 单数字段）。"""
+    refs = spec_or_item.get("references")
+    if refs:
+        return list(refs)
+    r = spec_or_item.get("reference")
+    if not r:
+        return []
+    return [r] if isinstance(r, str) else list(r)
 
 
 def est_cost(key, spec):
@@ -100,11 +97,11 @@ def est_cost(key, spec):
         if key == "clips":
             return round(sa.estimate_video(spec.get("resolution") or "480p", int(spec.get("duration") or 5)), 2)
         if key in ("characters", "scenes", "shots"):
-            n = len((spec.get("views") or "").split(",")) if spec.get("views") else 1
+            n = len(pu.parse_id_list(spec.get("views"))) if spec.get("views") else 1
             return round(sa.estimate_image(spec.get("model") or sa.DEFAULT_IMAGE_MODEL) * n, 2)
     except Exception:
-        pass
-    return 0.0
+        return None
+    return None
 
 
 def build_gen_cmd(project, key, spec):
@@ -127,6 +124,8 @@ def build_gen_cmd(project, key, spec):
         if key == "characters":
             if spec.get("gender"):
                 cmd += ["--gender", spec["gender"]]
+            if spec.get("build"):
+                cmd += ["--build", spec["build"]]
             if spec.get("views"):
                 cmd += ["--views", spec["views"]]
             if spec.get("style_ref"):
@@ -137,7 +136,6 @@ def build_gen_cmd(project, key, spec):
             if spec.get("scene"):
                 cmd += ["--scene", spec["scene"]]
         if refs:
-            # 分镜传全部参考（gen_image 会把多张拼成一张参考拼贴）；角色/场景只用单张
             cmd += ["--reference", ",".join(refs) if key == "shots" else refs[0]]
         return cmd
     if key == "clips":
@@ -155,8 +153,7 @@ def build_gen_cmd(project, key, spec):
             cmd += ["--sample"]
         if spec.get("characters"):
             cmd += ["--characters", spec["characters"]]
-        # 分镜图作参考（不再用首/尾帧——首尾帧与参考素材不能混用）
-        shots = spec.get("shots") or spec.get("shot")
+        shots = spec.get("shots")
         if shots:
             cmd += ["--shots", shots if isinstance(shots, str) else ",".join(shots)]
         if spec.get("prev_video"):
@@ -198,19 +195,19 @@ class GenQueue:
     def _key(self, spec):
         return f"{spec['category']}::{spec['id']}"
 
-    @staticmethod
-    def _norm(spec):
-        """容错：把单数 reference 归一成 references 数组（AI 常误写 reference）。"""
-        if not spec.get("references") and spec.get("reference"):
-            r = spec["reference"]
-            spec["references"] = [r] if isinstance(r, str) else list(r)
+    def _prepare_spec(self, spec):
+        """规范化 plan 字段并补全参考图。"""
+        spec = pu.normalize_plan_task(dict(spec))
+        try:
+            st = pu.load_state(self.project)
+            pu.resolve_generation_refs(st, spec.get("category"), spec)
+        except FileNotFoundError:
+            pass
         return spec
 
     def enqueue(self, spec, start=True):
-        """加入任务。start=True 立即排队生成；start=False 仅作为「待生成」草稿（AI 备好、等用户在 UI 点生成）。"""
-        spec = self._norm(dict(spec))
-        # 入队即解析分镜/视频的参考图（人设/场景/分镜图）——草稿卡片立刻就能看到用了哪些参考图，无需等"开始生成"
-        self._resolve_refs(spec, spec.get("category"))
+        """加入任务。start=True 立即排队生成；start=False 仅作为「待生成」草稿。"""
+        spec = self._prepare_spec(spec)
         with self.lock:
             k = self._key(spec)
             self.specs[k] = spec
@@ -387,8 +384,72 @@ class GenQueue:
                 return False
         return True
 
-    def _run_gen_subprocess(self, t, spec):
-        """跑一次 gen_*.py 子进程。返回 (成功, 失败说明, 是否用户取消)。"""
+    def _on_gen_log(self, t, line):
+        upd = {}
+        m = PCT.search(line)
+        if m:
+            upd["progress"] = max(0, min(100, int(m.group(1))))
+        ln = line.strip()
+        if ln:
+            upd["message"] = ln[:140]
+        if upd:
+            self._set(t, **upd)
+
+    def _run_gen(self, t, spec):
+        """执行生成：图像/视频直接调用核心函数，导出仍走子进程。返回 (成功, 失败说明, 是否用户取消)。"""
+        cat = t["category"]
+        with self.lock:
+            if t["status"] == "canceled":
+                return False, "", True
+
+        try:
+            if cat in ("characters", "scenes", "shots"):
+                import gen_image as gi
+                typ = {"characters": "character", "scenes": "scene", "shots": "shot"}[cat]
+                refs = spec.get("references") or []
+                gi.run_image_generation(
+                    self.project, img_type=typ, item_id=spec["id"],
+                    prompt=spec.get("prompt") or "", name=spec.get("name") or "",
+                    reference=",".join(refs) if refs else None,
+                    style_ref=spec.get("style_ref"), gender=spec.get("gender"),
+                    build=spec.get("build"), scene=spec.get("scene"),
+                    characters=spec.get("characters"), views=spec.get("views"),
+                    ratio=spec.get("ratio"), model=spec.get("model"),
+                    on_log=lambda line: self._on_gen_log(t, line),
+                )
+            elif cat == "clips":
+                import gen_video as gv
+                refs = spec.get("references") or []
+
+                def on_progress(pct, line):
+                    self._set(t, progress=max(0, min(100, int(pct))), message=line.strip()[:140])
+
+                gv.run_video_generation(
+                    self.project, item_id=spec["id"], prompt=spec.get("prompt") or "",
+                    reference=",".join(refs) if refs else None,
+                    characters=spec.get("characters"), shots=spec.get("shots"),
+                    duration=spec.get("duration"), ratio=spec.get("ratio"),
+                    model=spec.get("model"), resolution=spec.get("resolution"),
+                    sample=bool(spec.get("sample")), prev_video=spec.get("prev_video"),
+                    next_video=spec.get("next_video"), audio=spec.get("audio"),
+                    on_log=lambda line: self._on_gen_log(t, line),
+                    on_progress=on_progress,
+                )
+            elif cat == "exports":
+                return self._run_export_subprocess(t, spec)
+            else:
+                return False, f"未知分类：{cat}", False
+            with self.lock:
+                if t["status"] == "canceled":
+                    return False, "", True
+            return True, "", False
+        except sa.APIError as e:
+            return False, str(e), False
+        except Exception as e:
+            return False, f"生成失败：{e}", False
+
+    def _run_export_subprocess(self, t, spec):
+        """导出拼接仍走子进程（ffmpeg）。"""
         cmd = build_gen_cmd(self.project, t["category"], spec)
         if not cmd:
             return False, f"未知分类：{t['category']}", False
@@ -406,15 +467,7 @@ class GenQueue:
                         proc.terminate()
                         break
                 buf.append(line)
-                upd = {}
-                m = PCT.search(line)
-                if m:
-                    upd["progress"] = max(0, min(100, int(m.group(1))))
-                ln = line.strip()
-                if ln:
-                    upd["message"] = ln[:140]
-                if upd:
-                    self._set(t, **upd)
+                self._on_gen_log(t, line)
             proc.wait()
         except Exception as e:
             return False, f"启动生成失败：{e}", False
@@ -429,44 +482,6 @@ class GenQueue:
         tail = "".join(buf).strip()[-1200:]
         return False, self._friendly_fail(tail) or "生成失败", False
 
-    def _resolve_refs(self, spec, key):
-        """分镜/视频生成前，自动从已完成的阶段1 结果补全 characters 与参考图（人设图+场景图）。
-
-        这样即使 AI 在计划里忘了写 characters/scene，分镜/视频也会自动拿到角色设定图作参考，
-        并把解析到的参考图回写进 spec —— 卡片上即可见“用了哪些参考图”。
-        """
-        if key not in ("shots", "clips"):
-            return spec
-        try:
-            st = pu.load_state(self.project)
-        except Exception:
-            return spec
-        refs = list(spec.get("references") or [])
-        # 视频片段：把对应分镜图作参考（放最前）
-        if key == "clips":
-            sh = spec.get("shots") or spec.get("shot") or ""
-            sids = sh.split(",") if isinstance(sh, str) else list(sh)
-            for sid in [s.strip() for s in sids if s and str(s).strip()]:
-                it = pu.find(st.get("shots", []), sid)
-                img = it.get("image") if it else None
-                if img and img not in refs:
-                    refs.insert(0, img)
-        named = [c.strip() for c in (spec.get("characters") or "").split(",") if c.strip()]
-        # 解析参考图用的角色：AI 指定了就用指定的；没指定则退化到全体角色（仅作视觉参考）
-        ref_ids = named or [c["id"] for c in st.get("characters", [])]
-        for cid in ref_ids:
-            img = pu.character_image(st, cid)
-            if img and img not in refs:
-                refs.append(img)
-        if key == "shots" and spec.get("scene"):
-            simg = pu.scene_image(st, spec["scene"])
-            if simg and simg not in refs:
-                refs.append(simg)
-        if refs:
-            spec["references"] = refs   # 始终给视觉参考（卡片可见、生成可用；单次赋值，读取方拿到的总是完整列表）
-        # 不自动写 characters：身份锚点只作用于 AI 明确点名的出场角色
-        return spec
-
     def _exec(self, t, spec):
         if not pu.has_key(self.project):
             self._set(t, status="failed", message="未配置 API Key，无法生成。请在配置阶段填写 Key。")
@@ -477,13 +492,13 @@ class GenQueue:
                 self._set(t, status="failed",
                            message="导出环境未就绪（缺 ffmpeg）：\n" + "\n".join(msgs))
                 return
-        spec = self._resolve_refs(spec, t["category"])   # 自动补全分镜/视频的角色与参考图
+        spec = self._prepare_spec(spec)
         last_msg = "生成失败"
         for attempt in range(MAX_RETRIES + 1):
             if attempt > 0:
                 self._set(t, status="running", progress=None,
                           message=f"第 {attempt}/{MAX_RETRIES} 次重试…")
-            ok, msg, canceled = self._run_gen_subprocess(t, spec)
+            ok, msg, canceled = self._run_gen(t, spec)
             if canceled:
                 return
             if ok:
@@ -510,7 +525,7 @@ class GenQueue:
         totals["total"] = len(pub)
         return {"tasks": pub, "totals": totals,
                 "generating": totals["queued"] + totals["running"] > 0,
-                "cost_total": round(sum(x["cost"] for x in pub), 2)}
+                "cost_total": round(sum(x["cost"] or 0 for x in pub), 2)}
 
 
 class ReviewState:
@@ -534,7 +549,7 @@ class ReviewState:
         return {"id": c["id"], "title": c.get("name") or c["id"],
                 "meta": (c.get("gender") or ""), "prompt": c.get("prompt", ""),
                 "model": c.get("model", ""), "ratio": c.get("ratio", "16:9"),
-                "references": _ref_list(c.get("references"), c.get("reference")),
+                "references": _refs(c),
                 "media": media, "decision": c.get("review_decision", "通过"),
                 "note": c.get("review_note", ""), "status": c.get("status", "draft")}
 
@@ -544,7 +559,7 @@ class ReviewState:
         return {"id": it["id"], "title": it.get("name") or it["id"],
                 "meta": it.get("scene_id", ""), "prompt": it.get("prompt", ""),
                 "model": it.get("model", ""), "ratio": it.get("ratio", ""),
-                "references": _ref_list(it.get("references"), it.get("reference")),
+                "references": _refs(it),
                 "media": media, "decision": it.get("review_decision", "通过"),
                 "note": it.get("review_note", ""), "status": it.get("status", "draft")}
 
@@ -562,7 +577,7 @@ class ReviewState:
         return {"id": cl["id"], "title": cl["id"], "meta": cl.get("mode", ""),
                 "prompt": cl.get("prompt", ""), "model": cl.get("model", ""),
                 "duration": dur, "ratio": cl.get("ratio", ""),
-                "references": _ref_list(inp.get("reference", [])),
+                "references": list(inp.get("reference") or []),
                 "sample": part("sample"), "final": part("final"),
                 "decision": cl.get("review_decision", "通过"),
                 "note": cl.get("review_note", ""), "status": cl.get("status", "draft")}
@@ -644,7 +659,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            body = INDEX_HTML.encode("utf-8")
+            body = _load_index_html().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -733,14 +748,7 @@ class Handler(BaseHTTPRequestHandler):
             if not k:
                 self._send_json({"ok": False, "error": "Key 为空"}, 400)
                 return
-            kp = pu.key_path(self.project)
-            with open(kp, "w", encoding="utf-8") as f:
-                f.write(k)
-            try:
-                os.chmod(kp, 0o600)
-            except Exception:
-                pass
-            os.environ["SENSEAUDIO_KEY_FILE"] = kp  # 让本进程后续生成立即拾取
+            pu.save_project_key(self.project, k)
             self._send_json({"ok": True, "has_key": True})
             return
         if parsed.path == "/api/config":
@@ -767,6 +775,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/plan":
             # AI 只「准备」任务（draft），不自动生成；用户在 UI 点「开始生成」才真正跑。
+            if body.get("story"):
+                state = self.rs.load()
+                pu.apply_plan_meta(state, body)
+                self.rs.save(state)
             n = 0
             for spec in (body.get("tasks") or []):
                 if spec.get("category") and spec.get("id"):
@@ -817,487 +829,6 @@ class Handler(BaseHTTPRequestHandler):
         t = self.gq.enqueue(base)
         self._send_json({"ok": True, "task": t})
 
-
-INDEX_HTML = r"""<!DOCTYPE html>
-<html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>确认 · 实时审核</title>
-<style>
-:root{--bg:#0c0e13;--panel:#141823;--panel2:#10131c;--card:#1b2029;--card2:#161a23;--ink:#eef1f6;--mut:#99a1b2;--soft:#727b90;
---ok:#34d399;--no:#fb7185;--line:#262c39;--line2:#343c4b;--accent:#8aa4ff;--accent2:#a98bff;--ring:rgba(138,164,255,.40)}
-@media(prefers-color-scheme:light){:root{--bg:#f3f5fb;--panel:#fff;--panel2:#f7f9fd;--card:#fff;--card2:#f5f8fd;--ink:#171b24;--mut:#5a6376;--soft:#8089a0;--line:#e7ebf4;--line2:#dde3ef;--ring:rgba(74,108,247,.30)}}
-*{box-sizing:border-box}html,body{height:100%}
-body{margin:0;color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;-webkit-font-smoothing:antialiased;
-background:radial-gradient(900px 460px at 100% -8%,rgba(138,164,255,.13),transparent 60%),radial-gradient(740px 420px at -6% 2%,rgba(169,139,255,.10),transparent 55%),var(--bg)}
-::selection{background:rgba(138,164,255,.32)}
-.app{display:flex;height:100vh;overflow:hidden}
-aside{width:230px;flex:none;background:linear-gradient(180deg,var(--panel),var(--panel2));border-right:1px solid var(--line);display:flex;flex-direction:column;padding:18px 14px}
-.brand{display:flex;align-items:center;gap:11px;padding:2px 8px 18px;font-weight:700;font-size:15.5px;letter-spacing:.01em}
-.brand i{width:9px;height:24px;border-radius:6px;background:linear-gradient(180deg,var(--accent),var(--accent2));display:inline-block;box-shadow:0 4px 12px rgba(138,164,255,.45);flex:none}
-.brand span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-nav{display:flex;flex-direction:column;gap:4px}
-.nav-i{position:relative;display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:12px;color:var(--mut);font-size:14px;cursor:pointer;transition:.15s;user-select:none}
-.nav-i:hover{color:var(--ink);background:var(--card2)}
-.nav-i.active{color:var(--ink);background:color-mix(in srgb,var(--accent) 15%,transparent);font-weight:600}
-.nav-i.active::before{content:"";position:absolute;left:-3px;top:50%;transform:translateY(-50%);width:3px;height:18px;border-radius:3px;background:linear-gradient(180deg,var(--accent),var(--accent2))}
-.nav-i .ico{font-size:17px;width:20px;text-align:center}
-.nav-i .cnt{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--soft);background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:1px 8px;min-width:24px;justify-content:center}
-.nav-i.active .cnt{color:var(--ink)}
-.nav-i .nl{flex:1}
-.nav-i .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.1s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.nav-stage{display:flex;align-items:center;gap:8px;padding:14px 10px 6px;font-size:11px;color:var(--soft);letter-spacing:.05em;text-transform:uppercase}
-.nav-stage:first-child{padding-top:4px}
-.nav-stage .sn{width:17px;height:17px;border-radius:6px;background:var(--card2);border:1px solid var(--line2);color:var(--mut);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
-.nav-stage.active .sn{background:linear-gradient(180deg,var(--accent),var(--accent2));color:#0a1230;border-color:transparent}
-.nav-stage.done .sn{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok);border-color:transparent}
-.nav-stage .sl{flex:1}.nav-stage.active .sl,.nav-stage.done .sl{color:var(--ink)}
-.nav-stage .okdot{color:var(--ok);font-size:12px}
-.nav-stage .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.1s infinite}
-.stage-tag{font-size:12px;color:var(--mut);background:var(--card2);border:1px solid var(--line2);padding:3px 11px;border-radius:999px}
-.guide{margin:0 0 14px;padding:10px 13px;border-radius:11px;font-size:12.5px;line-height:1.6;color:var(--mut);
-background:color-mix(in srgb,var(--accent) 9%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent)}
-.guide.warn{color:var(--no);background:color-mix(in srgb,var(--no) 10%,transparent);border-color:color-mix(in srgb,var(--no) 35%,transparent)}
-.guide a{color:var(--accent);text-decoration:none;font-weight:600;cursor:pointer}.guide a:hover{text-decoration:underline}
-.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:12px}
-.side-btn{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;color:var(--mut);font-size:13.5px;cursor:pointer;border:1px solid var(--line);background:var(--card2);text-decoration:none;transition:.15s}
-.side-btn:hover{color:var(--ink);border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}.side-btn .ico{font-size:16px}
-.side-btn.danger:hover{border-color:var(--no);box-shadow:0 0 0 3px color-mix(in srgb,var(--no) 35%,transparent);color:var(--no)}
-main{flex:1;min-width:0;display:flex;flex-direction:column}
-.top{padding:16px 26px 0;background:color-mix(in srgb,var(--panel) 80%,transparent);backdrop-filter:saturate(150%) blur(10px);-webkit-backdrop-filter:saturate(150%) blur(10px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:6}
-.top-row{display:flex;align-items:center;gap:12px;padding-bottom:14px}
-.top h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.01em}.top .sub{color:var(--mut);font-size:12.5px;flex:1}
-.pbar{display:flex;align-items:center;gap:12px;padding:0 0 14px}
-.pbar.hide{display:none}
-.pbar .ptext{font-size:12px;color:var(--mut);white-space:nowrap}
-.track{flex:1;height:7px;background:var(--card2);border:1px solid var(--line);border-radius:99px;overflow:hidden}
-.track>span{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));width:0;transition:width .3s;border-radius:99px}
-.scroll{flex:1;overflow:auto;padding:22px 26px 36px}
-.scroll::-webkit-scrollbar{width:11px}.scroll::-webkit-scrollbar-thumb{background:var(--line2);border-radius:99px;border:3px solid transparent;background-clip:padding-box}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:18px;max-width:1280px}
-.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--line);border-radius:18px;padding:16px 17px;box-shadow:0 10px 30px rgba(0,0,0,.20);transition:.18s}
-.card:hover{transform:translateY(-2px);border-color:var(--line2)}
-.card.running{border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
-.card.queued{opacity:.7;border-style:dashed}
-.card.draft{border-style:dashed;border-color:var(--line2)}
-.card.failed{border-color:var(--no)}
-.card.rev{border-color:var(--no)}
-.ch{display:flex;align-items:center;gap:8px;margin-bottom:12px;min-width:0}
-.ch h3{font-size:15.5px;margin:0 auto 0 0;font-weight:650;min-width:0;overflow-wrap:anywhere}
-.badge{font-size:11px;padding:3px 10px;border-radius:999px;font-weight:600;letter-spacing:.02em}
-.badge.done{color:#06281c;background:var(--ok)}.badge.running{color:#0a1230;background:var(--accent)}
-.badge.queued{color:var(--mut);background:var(--card2);border:1px solid var(--line2)}
-.badge.failed{color:#3a0f16;background:var(--no)}
-.pill{font-size:11.5px;color:var(--mut);background:var(--card2);border:1px solid var(--line);padding:3px 10px;border-radius:999px;display:inline-block;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;flex:none}
-.badge{flex:none}
-.cstat{margin-bottom:11px}
-.cprog{display:flex;align-items:center;gap:8px}.cprog .track{height:7px}.cprog .pp{font-size:11px;color:var(--mut);min-width:34px;text-align:right}
-.cmsg{font-size:11.5px;color:var(--soft);margin-top:7px;line-height:1.5;word-break:break-all;max-height:46px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.skeleton{height:158px;border-radius:13px;border:1px solid var(--line);background:repeating-linear-gradient(135deg,#1d2230,#1d2230 14px,#232a3a 14px,#232a3a 28px);display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px}
-@media(prefers-color-scheme:light){.skeleton{background:repeating-linear-gradient(135deg,#eef1f8,#eef1f8 14px,#e5eaf4 14px,#e5eaf4 28px)}}
-.errbox{border:1px solid var(--no);background:color-mix(in srgb,var(--no) 12%,transparent);color:var(--no);border-radius:12px;padding:10px 12px;font-size:12.5px;max-height:100px;overflow:auto;white-space:pre-wrap}
-.media{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:11px}
-.thumb{position:relative;border-radius:13px;overflow:hidden;background:#000;border:1px solid var(--line);flex:0 0 auto}
-.thumb img,.thumb video{height:176px;width:auto;max-width:266px;display:block;object-fit:cover;cursor:zoom-in;transition:.25s}
-.thumb:hover img{transform:scale(1.04)}
-.thumb .dl{position:absolute;top:8px;right:8px;width:30px;height:30px;border-radius:9px;background:rgba(8,10,16,.6);color:#fff;text-align:center;line-height:32px;text-decoration:none;border:1px solid rgba(255,255,255,.18);opacity:0;transition:.15s;backdrop-filter:blur(4px)}
-.thumb:hover .dl{opacity:1}.thumb .dl:hover{background:var(--accent);color:#0a1230}
-.cap{font-size:11px;color:var(--mut);text-align:center;margin-top:5px}
-.aud{display:flex;flex-direction:column;gap:5px;align-items:flex-start}.aud audio{width:248px}
-.lbl{font-size:12px;color:var(--mut);margin:11px 0 5px;font-weight:500}
-textarea,input[type=text],input[type=number],select{width:100%;background:var(--bg);border:1px solid var(--line2);color:var(--ink);border-radius:10px;padding:9px 11px;font:13px/1.5 inherit;transition:.12s}
-textarea{resize:vertical;min-height:62px}
-textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
-.refs{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-.ref{position:relative;width:66px;height:66px;border-radius:11px;overflow:hidden;border:1px solid var(--line2);transition:.15s}.ref:hover{border-color:var(--accent)}
-.ref img{width:100%;height:100%;object-fit:cover;cursor:zoom-in}
-.ref .rx{position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.62);color:#fff;font-size:11px;line-height:20px;border:0;cursor:pointer;text-align:center;transition:.12s}.ref .rx:hover{background:var(--no)}
-.ref-up{width:66px;height:66px;flex:none;border-radius:11px;border:1px dashed var(--line2);color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;transition:.15s}.ref-up:hover{color:var(--accent);border-color:var(--accent)}
-.ref-up .ru-ic{font-size:18px;line-height:1}.ref-up .ru-t{font-size:11px;line-height:1}
-.setbox{background:color-mix(in srgb,var(--bg) 50%,transparent);border:1px solid var(--line);border-radius:13px;padding:12px 13px;margin:13px 0}
-.setbox .sgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.setbox label{font-size:12px;color:var(--mut);display:block}
-.foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:13px;margin-top:6px}
-.seg{display:inline-flex;border:1px solid var(--line2);border-radius:11px;overflow:hidden}
-.seg button{background:var(--bg);color:var(--mut);border:0;font-size:13px;padding:8px 14px;cursor:pointer;transition:.12s}
-.seg button+button{border-left:1px solid var(--line2)}
-.seg button.on.ok{background:var(--ok);color:#06281c;font-weight:600}.seg button.on.no{background:var(--no);color:#3a0f16;font-weight:600}
-.btn{background:linear-gradient(180deg,var(--accent),var(--accent2));color:#0a1230;border:0;border-radius:12px;padding:10px 16px;font-weight:650;font-size:13.5px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 14px rgba(138,164,255,.30);transition:.15s}
-.btn:hover{filter:brightness(1.05);transform:translateY(-1px)}.btn:active{transform:translateY(0)}
-.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line2);box-shadow:none}.btn.ghost:hover{border-color:var(--accent)}
-.btn[disabled]{opacity:.4;cursor:not-allowed;filter:none;transform:none;box-shadow:none}
-.btn.sm{padding:7px 12px;font-size:12.5px}.btn.regen{margin-left:auto}.note{flex:1;min-width:140px}
-.empty{min-height:54vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--mut);gap:7px;padding:40px}
-.empty .ico{width:74px;height:74px;border-radius:22px;display:flex;align-items:center;justify-content:center;font-size:33px;background:color-mix(in srgb,var(--accent) 14%,transparent);border:1px solid var(--line2);margin-bottom:10px}
-.empty h3{margin:0;color:var(--ink);font-size:16.5px;font-weight:650}
-.empty p{margin:0;font-size:13.5px;max-width:380px;line-height:1.7}
-.empty a{color:var(--accent);text-decoration:none;font-weight:600;cursor:pointer}.empty a:hover{text-decoration:underline}
-.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(8px);background:var(--card);border:1px solid var(--line2);color:var(--ink);padding:11px 17px;border-radius:12px;font-size:13px;box-shadow:0 12px 34px rgba(0,0,0,.34);opacity:0;transition:.2s;pointer-events:none;z-index:80;max-width:80vw}
-.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-.scrim{position:fixed;inset:0;background:rgba(6,8,12,.6);backdrop-filter:blur(3px);display:none;z-index:40}.scrim.show{display:block}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:392px;max-width:90vw;background:linear-gradient(180deg,var(--panel),var(--panel2));border-left:1px solid var(--line2);transform:translateX(100%);transition:.24s cubic-bezier(.2,.8,.2,1);z-index:50;display:flex;flex-direction:column;box-shadow:-20px 0 60px rgba(0,0,0,.3)}
-.drawer.show{transform:none}.drawer h2{font-size:15px;margin:0;font-weight:650}
-.dh{display:flex;align-items:center;padding:18px 20px;border-bottom:1px solid var(--line)}.dh .x{margin-left:auto;background:transparent;border:0;color:var(--mut);font-size:18px;cursor:pointer;border-radius:8px;width:30px;height:30px}.dh .x:hover{background:var(--card2);color:var(--ink)}
-.dbody{padding:18px 20px;overflow:auto}.dbody .grp{margin-bottom:20px}.dbody .grp>.t{font-size:11.5px;color:var(--accent);font-weight:600;letter-spacing:.05em;text-transform:uppercase;margin-bottom:10px}
-.dfield{margin-bottom:11px}.dfield label{font-size:12px;color:var(--mut);display:block;margin-bottom:5px}
-.chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink)}.chk input{width:auto}
-.savehint{font-size:12px;color:var(--mut);padding:0 20px 16px}
-#lb{position:fixed;inset:0;z-index:90;background:rgba(6,8,12,.88);backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;padding:32px}
-#lb.show{display:flex}#lb img{max-width:92vw;max-height:82vh;border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6)}
-#lb .bar{position:absolute;top:18px;right:18px;display:flex;gap:10px}
-#lb .bar a,#lb .bar button{background:rgba(255,255,255,.13);color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:11px;padding:9px 15px;font-size:14px;text-decoration:none;cursor:pointer;font-weight:600}#lb .bar a:hover,#lb .bar button:hover{background:rgba(255,255,255,.24)}
-#picker{position:fixed;inset:0;z-index:95;background:rgba(6,8,12,.7);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:32px}
-#picker.show{display:flex}
-.picker-box{width:760px;max-width:92vw;max-height:82vh;background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line2);border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.5)}
-.picker-h{display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:1px solid var(--line);font-size:15px;font-weight:650}
-.picker-h button{background:transparent;border:0;color:var(--mut);font-size:18px;cursor:pointer;border-radius:8px;width:30px;height:30px}.picker-h button:hover{background:var(--card2);color:var(--ink)}
-.picker-body{padding:16px 18px;overflow:auto}
-.pg{margin-bottom:16px}.pgl{font-size:12px;color:var(--accent);font-weight:600;margin-bottom:8px}
-.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px}
-.pgrid img{width:100%;height:96px;object-fit:cover;border-radius:10px;border:1px solid var(--line2);cursor:pointer;transition:.12s;background:#000}
-.pgrid img:hover{border-color:var(--accent);box-shadow:0 0 0 3px var(--ring);transform:translateY(-2px)}
-</style></head>
-<body>
-<div class="app">
-  <aside>
-    <div class="brand"><i></i><span id="brand">短剧项目</span></div>
-    <nav id="nav"></nav>
-    <div class="side-foot">
-      <div class="side-btn" onclick="openSettings()"><span class="ico">⚙</span>设置（配置）</div>
-      <div class="side-btn danger" onclick="shutdownApp()"><span class="ico">⏻</span>关闭服务</div>
-    </div>
-  </aside>
-  <main>
-    <div class="top">
-      <div class="top-row">
-        <h1 id="cat-title">…</h1><span class="sub" id="cat-sub"></span>
-        <button class="btn" id="btn-gen" style="display:none" onclick="generateAll()">▶ 开始生成</button>
-        <span class="stage-tag" id="stage-tag"></span>
-      </div>
-      <div class="pbar hide" id="pbar">
-        <span class="ptext" id="ptext"></span>
-        <span class="track"><span id="pfill"></span></span>
-        <span class="ptext" id="pcost"></span>
-        <button class="btn ghost sm" onclick="stopAll()">全部停止</button>
-      </div>
-      <div class="guide" id="guide"></div>
-    </div>
-    <div class="scroll"><div class="cards" id="cards"></div></div>
-  </main>
-</div>
-
-<div class="scrim" id="scrim" onclick="closeSettings()"></div>
-<div class="drawer" id="drawer">
-  <div class="dh"><h2>⚙ 配置（随时可改，即时生效）</h2><button class="x" onclick="closeSettings()">✕</button></div>
-  <div class="dbody" id="dbody"></div>
-  <div class="savehint">改动会自动保存并应用到后续生成。</div>
-</div>
-<div id="lb" onclick="if(event.target.id==='lb')this.classList.remove('show')">
-  <div class="bar"><a id="lbdl" href="#" download>⬇ 下载</a><button onclick="document.getElementById('lb').classList.remove('show')">✕</button></div>
-  <img id="lbimg" src="" alt="">
-</div>
-<div id="picker" onclick="if(event.target.id==='picker')closePicker()">
-  <div class="picker-box"><div class="picker-h"><span>从工作目录选参考图</span><button onclick="closePicker()">✕</button></div>
-    <div class="picker-body" id="picker-body"></div></div>
-</div>
-<div class="toast" id="toast"></div>
-
-<script>
-let S=null, CUR=null, TASK={}, TOTS=null, POLL_T=null, VMODE='sample';   // VMODE: 视频子页 样片/成片
-const $=s=>document.querySelector(s);
-function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2600);}
-function zoom(src,name){$('#lbimg').src=src;const d=$('#lbdl');d.href=src;d.download=name||'image';$('#lb').classList.add('show');}
-async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return r.json();}
-function tkey(cat,id){return cat+'::'+id;}
-
-async function load(){S=await api('/api/state');
-  $('#brand').textContent=S.title;
-  renderSettings();
-  const first=S.categories.find(c=>c.count>0)||S.categories[0];
-  CUR=first.key; renderNav(); renderCards();
-  applyHash();
-  if(!S.has_key)openSettings();   // 首次打开（还没配 Key）直接弹出配置窗口，引导用户填 Key/设置
-  poll();
-}
-function applyHash(){const h=(location.hash||'').slice(1);
-  if(h==='config'){openSettings();return;}
-  if(h&&S.categories.some(c=>c.key===h))select(h);}
-window.addEventListener('hashchange',applyHash);
-function catTasks(key){return Object.values(TASK).filter(t=>t.category===key&&(t.status==='running'||t.status==='queued'));}
-const ICONS={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️',film:'📽️'};
-function stageOfCat(k){const s=(S.stages||[]).find(x=>x.cats.includes(k));return s?s.n:1;}
-function stageState(stg){  // 'active' 有任务在跑 | 'done' 有成果且无在跑 | 'idle' 空
-  const act=Object.values(TASK).some(t=>stg.cats.includes(t.category)&&(t.status==='running'||t.status==='queued'));
-  if(act)return 'active';
-  const cnt=stg.cats.reduce((s,k)=>s+((S.categories.find(c=>c.key===k)||{}).count||0),0);
-  return cnt>0?'done':'idle';}
-function renderNav(){const byKey={};S.categories.forEach(c=>byKey[c.key]=c);
-  let html='';
-  (S.stages||[]).forEach(stg=>{const st=stageState(stg);
-    const mark=st==='active'?'<span class="dot"></span>':st==='done'?'<span class="okdot">✓</span>':'';
-    html+=`<div class="nav-stage ${st}"><span class="sn">${stg.n}</span><span class="sl">${stg.label}</span>${mark}</div>`;
-    stg.cats.forEach(k=>{const c=byKey[k];if(!c)return;
-      if(k==='clips'){   // 视频片段拆成两个子页：样片生成 / 成片生成
-        [['sample','样片生成'],['final','成片生成']].forEach(([m,label])=>{
-          const a=catTasks('clips').filter(t=>{const s=t.spec||{};return (s.sample?'sample':'final')===m;}).length;
-          html+=`<div class="nav-i${(CUR==='clips'&&VMODE===m)?' active':''}" onclick="select('clips','${m}')"><span class="ico">🎞️</span><span class="nl">${label}</span><span class="cnt">${a?'<span class=dot></span>':''}${c.count}</span></div>`;});
-        return;}
-      const a=catTasks(k).length;
-      html+=`<div class="nav-i${k===CUR?' active':''}" onclick="select('${k}')"><span class="ico">${ICONS[c.icon]||'•'}</span><span class="nl">${c.label}</span><span class="cnt">${a?'<span class=dot></span>':''}${c.count}</span></div>`;});
-  });
-  $('#nav').innerHTML=html;}
-const GUIDE={
-  characters:'阶段1·设定：先确认角色三视图——它会作为后续分镜/视频锁脸/锁服装的参考。逐项「通过/需修改」，不满意就改提示词「重新生成」。',
-  scenes:'阶段1·设定：确认场景图（纯环境、无人物）。角色+场景都确认后，在对话里说「继续」，我来生成分镜。',
-  shots:'阶段2·分镜：每张分镜已自动参考阶段1 的人设图+场景图（参考图见下方）。确认机位与构图后说「继续」，我来出视频。',
-  exports:'阶段4·导出：把已生成的视频片段按剧情时间顺序拼接成一条成片，并可打包下载全部素材。顺序由 AI 结合你的需求排定，点「合成导出」生成（需要 ffmpeg）。'};
-function setGuide(key){const g=$('#guide');const has=S.has_key;
-  if(!has){g.className='guide warn';g.innerHTML='⚠ 还没配置 API Key，无法生成。请先在 <a onclick="openSettings()">设置 · 填 Key</a>。';return;}
-  g.className='guide';
-  if(key==='clips'){g.textContent=VMODE==='sample'
-    ?'阶段3·样片生成：先出 480p 样片快速预览、最省积分。不满意就改卡片提示词/参考图（或让 AI 调整）后重出；满意后去「成片生成」出高清。'
-    :'阶段3·成片生成：样片确认 OK 后，在这里出高清成片（默认 720p/1080p，可在卡片调）。样片与成片各自独立保留。';return;}
-  g.textContent=GUIDE[key]||'';}
-function select(key,mode){CUR=key;if(key==='clips'&&mode)VMODE=mode;
-  const cat=S.categories.find(c=>c.key===key)||{};
-  const title=key==='clips'?(VMODE==='sample'?'样片生成':'成片生成'):(cat.label||'');
-  $('#cat-title').textContent=title;$('#cat-sub').textContent=`${cat.count||0} 项`;
-  const stg=(S.stages||[]).find(x=>x.cats.includes(key));
-  $('#stage-tag').textContent=stg?`阶段 ${stg.n} · ${stg.label}`:'';
-  setGuide(key);renderNav();renderCards();
-  try{history.replaceState(null,'','#'+key);}catch(e){}}
-
-function mediaHTML(m){if(!m.src)return '';
-  if(m.type==='video')return `<div class="thumb"><video controls preload="metadata" src="${m.src}"></video><a class="dl" href="${m.src}" download="${m.name}">⬇</a></div>`;
-  if(m.type==='audio')return `<div class="aud"><audio controls src="${m.src}"></audio><a class="dl" style="position:static;width:auto;height:auto;line-height:1.4;padding:3px 9px;font-size:12px" href="${m.src}" download="${m.name}">⬇ 下载</a></div>`;
-  return `<div class="thumb"><img src="${m.src}" loading="lazy" onclick="zoom('${m.src}','${m.name}')"><a class="dl" href="${m.src}" download="${m.name}" onclick="event.stopPropagation()">⬇</a></div>`;}
-function opt(list,val){return list.map(o=>{const v=typeof o==='string'?o:o.id;const lab=typeof o==='string'?o:`${o.id}（~${o.price}元/张）`;return `<option value="${v}"${v===val?' selected':''}>${lab}</option>`;}).join('');}
-function setBox(it){const o=S.options;
-  if(CUR==='exports')return '';   // 导出无生成参数（顺序见上方，画幅取全局）
-  if(CUR==='clips'){const res=(it[VMODE]||{}).resolution||(VMODE==='sample'?S.config.video.resolution_sample:S.config.video.resolution_final);
-    return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 ${VMODE==='sample'?'样片':'成片'}生成设置（覆盖全局）</div><div class="sgrid">
-    <label>模型<select data-f="model">${opt(o.video_models,it.model||S.config.video.model)}</select></label>
-    <label>分辨率<select data-f="resolution">${opt(o.resolutions,res)}</select></label>
-    <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
-    <label>时长(秒)<input type="number" data-f="duration" min="4" max="15" value="${it.duration||5}"></label>
-  </div></div>`;}
-  return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 本图生成设置（覆盖全局）</div><div class="sgrid">
-    <label>模型<select data-f="model">${opt(o.image_models,it.model||S.config.image.model)}</select></label>
-    <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
-  </div></div>`;}
-
-function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-function escA(s){return esc(s).replace(/"/g,'&quot;');}   // 属性值转义（额外处理引号）
-function statHTML(t){if(!t)return '';
-  if(t.status==='draft')return `<div class="cstat"><div class="cmsg">✦ 已就绪：确认提示词/参考图后点「生成」。</div></div>`;
-  if(t.status==='queued')return `<div class="cstat"><div class="cmsg">⏳ 排队中，等待空闲生成位…</div></div>`;
-  if(t.status==='running')return `<div class="cstat"><div class="cprog"><span class="track"><span style="display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));width:${t.progress==null?30:t.progress}%;transition:width .3s"></span></span><span class="pp">${t.progress==null?'生成中':t.progress+'%'}</span></div>${t.message?`<div class="cmsg">${esc(t.message)}</div>`:''}</div>`;
-  if(t.status==='canceled')return `<div class="cstat"><div class="cmsg">⏹ 已停止${t.message&&t.message!=='已停止'?(' · '+esc(t.message)):''}</div></div>`;
-  if(t.status==='failed')return `<div class="cstat"><div class="errbox">${esc(t.message||'生成失败')}</div></div>`;
-  return '';}
-
-function cardHTML(it){const isClip=CUR==='clips', isExport=CUR==='exports';
-  const sub=isClip?(it[VMODE]||{}):null;
-  const media=isClip?(sub.media||[]):(it.media||[]);
-  const t=TASK[tkey(CUR,it.id)];
-  const tMode=(isClip&&t&&t.spec)?(t.spec.sample?'sample':'final'):null;
-  const ct=isClip?(t&&tMode===VMODE?t:null):t;   // 任务是否属于当前样片/成片子页
-  const st=ct?ct.status:(media.length?'done':(isClip?'draft':'idle'));
-  const cls=st==='running'?'running':st==='queued'?'queued':st==='draft'?'draft':st==='failed'?'failed':(it.decision==='需修改'?'rev':'');
-  const badge={done:'<span class="badge done">✓ 完成</span>',running:'<span class="badge running">⟳ 生成中</span>',
-    queued:'<span class="badge queued">排队中</span>',draft:'<span class="badge queued">✦ 待生成</span>',
-    failed:'<span class="badge failed">✕ 失败</span>',canceled:'<span class="badge queued">⏹ 已停止</span>'}[st]||'';
-  let mediaArea;
-  if(st==='running'||st==='queued') mediaArea=`<div class="skeleton">${st==='queued'?'等待前序任务…':isExport?'拼接中…':'渲染中…'}</div>`;
-  else if(st==='draft') mediaArea=`<div class="skeleton">（${isClip?(VMODE==='sample'?'待出样片 · 点「生成样片」':'待出成片 · 点「生成成片」'):'待生成 · 确认后点「生成」'}）</div>`;
-  else{const m=media.map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
-    mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
-  const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button></div>`).join('');
-  const editBlock=isExport?`<div class="lbl">拼接顺序（${(it.order||[]).length} 段 · 由 AI 按剧情排定）</div><div class="cmsg" style="font-family:inherit;color:var(--mut)">${(it.order||[]).map(esc).join(' → ')||'（未指定，请让 AI 排定）'}</div>`
-    :`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${esc(it.prompt)}</textarea>
-    <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
-  const okOn=it.decision!=='需修改';
-  const busy=(st==='running'||st==='queued');
-  const gw=isClip?(VMODE==='sample'?'样片':'成片'):'';
-  const stopBtn=busy?`<button class="btn ghost sm" onclick="stopOne(this)">⏹ 停止</button>`:'';
-  const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':isClip?'生成'+gw:'生成'}</button>`
-    :st==='failed'||st==='canceled'?`<button class="btn regen" onclick="regen(this)">↻ ${isExport?'重试导出':isClip?'重试'+gw:'重试'}</button>`
-    :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':isClip?'重出'+gw:'重新生成这一张'}</button>`;
-  return `<div class="card ${cls}" data-id="${it.id}">
-    <div class="ch"><h3>${esc(it.title)}</h3>${it.meta?`<span class="pill" title="${escA(it.meta)}">${esc(it.meta)}</span>`:''}${badge}</div>
-    ${statHTML(ct)}
-    ${mediaArea}
-    ${editBlock}
-    ${setBox(it)}
-    <div class="foot">
-      <div class="seg"><button class="ok${okOn?' on':''}" onclick="decide(this,'通过')">✓ 通过</button><button class="no${!okOn?' on':''}" onclick="decide(this,'需修改')">✎ 需修改</button></div>
-      <input class="note" type="text" data-f="note" placeholder="意见（可留空）" value="${escA(it.note)}">
-      ${stopBtn}${action}
-    </div></div>`;}
-
-function taskItem(t){const s=t.spec||{};   // 把"还没落进 state 的在途任务"合成为占位卡片
-  const order=Array.isArray(s.order)?s.order:(s.order?String(s.order).split(',').map(x=>x.trim()).filter(Boolean):[]);
-  return {id:t.item_id,title:t.label||t.item_id,meta:'',prompt:s.prompt||'',
-    model:s.model||'',ratio:s.ratio||'',resolution:s.resolution||'480p',duration:s.duration||5,
-    references:s.references||[],order:order,
-    media:[],decision:'通过',note:''};}
-function renderCards(){const items=(S.items[CUR]||[]).slice();
-  const ids=new Set(items.map(it=>it.id));
-  // 首次生成的资产在完成前不在 state 里——把它们的任务也渲染成占位卡片，实时显示状态
-  Object.values(TASK).forEach(t=>{ if(t.category===CUR && !ids.has(t.item_id)){ items.push(taskItem(t)); ids.add(t.item_id); }});
-  // 导出页顶部放「打包下载全部」（中间图像+片段+成片）；用 grid-column 跨满整行
-  const zipBar=CUR==='exports'?`<div class="setbox" style="grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><div class="lbl" style="margin:0">📦 打包下载本项目全部素材：中间图像（人设/场景/分镜）+ 视频片段 + 成片导出</div><a class="btn" href="/api/export-zip" download>⬇ 打包下载全部</a></div>`:'';
-  if(items.length){$('#cards').innerHTML=zipBar+items.map(cardHTML).join('');return;}
-  if(zipBar){$('#cards').innerHTML=zipBar+'<div class="empty" style="grid-column:1/-1;min-height:30vh"><div class="ico">📽️</div><h3>成片导出</h3><p>让 AI 把要拼接的片段按剧情排好顺序，这里点「合成导出」即可生成整片；上面可随时打包下载全部素材。</p></div>';return;}
-  const cat=S.categories.find(c=>c.key===CUR)||{};
-  const ico={characters:'🧑',scenes:'🏙️',shots:'🎬',clips:'🎞️',exports:'📽️'}[CUR]||'✨';
-  const hint=S.has_key
-    ? '这一阶段还没有内容。按阶段推进：人设/场景 → 分镜 → 视频；在对话里告诉我需求、或让我「继续下一阶段」即可，进度会实时显示在这里。'
-    : '还没有内容。先打开 <a onclick="openSettings()">设置 · 填 API Key</a>，填好我就开始生成。';
-  $('#cards').innerHTML=`<div class="empty"><div class="ico">${ico}</div><h3>${cat.label||''}</h3><p>${hint}</p></div>`;}
-
-let PICK_CARD=null;
-async function openPicker(btn){PICK_CARD=btn.closest('.card');
-  const b=$('#picker-body');b.innerHTML='<div style="color:var(--mut);padding:20px">加载中…</div>';
-  $('#picker').classList.add('show');
-  let r;try{r=await api('/api/files');}catch(e){r={groups:[]};}
-  if(!r.groups||!r.groups.length){b.innerHTML='<div style="color:var(--mut);padding:24px;text-align:center">工作目录里还没有图片。先生成人设/场景，或把图片放进 assets/refs/ 目录。</div>';return;}
-  b.innerHTML=r.groups.map(g=>`<div class="pg"><div class="pgl">${g.label}</div><div class="pgrid">${g.files.map(f=>`<img src="/media?path=${encodeURIComponent(f)}" title="${f}" onclick="pickFile('${f.replace(/'/g,"\\'")}')">`).join('')}</div></div>`).join('');}
-function closePicker(){$('#picker').classList.remove('show');}
-function pickFile(path){if(!PICK_CARD){closePicker();return;}
-  const wrap=PICK_CARD.querySelector('.refs'),up=wrap.querySelector('.ref-up');
-  if([...wrap.querySelectorAll('.ref')].some(d=>d.dataset.path===path)){closePicker();toast('已在参考图里');return;}
-  const d=document.createElement('div');d.className='ref';d.dataset.path=path;d.dataset.removed='0';
-  d.innerHTML=`<img src="/media?path=${encodeURIComponent(path)}" onclick="zoom('/media?path=${encodeURIComponent(path)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button>`;
-  wrap.insertBefore(d,up);closePicker();toast('已添加参考图：'+path);}
-function removeRef(btn){const d=btn.closest('.ref');if(!d)return;
-  if(d.dataset.added==='1'){const card=btn.closest('.card');const id=card&&card.dataset.id;const img=d.querySelector('img');
-    const arr=PENDING[id]||[];const i=img?arr.indexOf(img.getAttribute('src')):-1;if(i>=0)arr.splice(i,1);}
-  d.remove();}
-const PENDING={};
-function addImageFile(card,f){if(!card||!f)return;const id=card.dataset.id;PENDING[id]=PENDING[id]||[];
-  const rd=new FileReader();rd.onload=()=>{PENDING[id].push(rd.result);
-    const wrap=card.querySelector('.refs'),up=wrap.querySelector('.ref-up');
-    const d=document.createElement('div');d.className='ref';d.dataset.added='1';d.dataset.removed='0';
-    d.innerHTML=`<img src="${rd.result}" onclick="zoom('${rd.result}','paste')"><button class="rx" onclick="removeRef(this)">✕</button>`;
-    wrap.insertBefore(d,up);};rd.readAsDataURL(f);}
-function addRefs(input){const card=input.closest('.card');[...input.files].forEach(f=>addImageFile(card,f));input.value='';}
-// 记录“当前活动卡片”，支持 Ctrl+V 粘贴图片到该卡片
-let LAST_CARD=null;
-document.addEventListener('click',e=>{const c=e.target.closest&&e.target.closest('.card');if(c)LAST_CARD=c;},true);
-document.addEventListener('focusin',e=>{const c=e.target.closest&&e.target.closest('.card');if(c)LAST_CARD=c;});
-document.addEventListener('paste',e=>{const items=(e.clipboardData||{}).items;if(!items)return;
-  for(const it of items){if(it.type&&it.type.indexOf('image')===0){const f=it.getAsFile();
-    const card=LAST_CARD||document.querySelector('.card');
-    if(card&&f){addImageFile(card,f);const nm=(card.querySelector('h3')||{}).textContent||'';toast('已粘贴参考图到「'+nm+'」，点「重新生成/生成」生效');e.preventDefault();}
-    return;}}});
-function decide(btn,val){const seg=btn.parentElement;seg.querySelectorAll('button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
-  const card=btn.closest('.card');card.classList.toggle('rev',val==='需修改');
-  api('/api/decision',{category:CUR,id:card.dataset.id,decision:val,note:card.querySelector('[data-f=note]').value});}
-function cardFields(card){const o={};card.querySelectorAll('[data-f]').forEach(e=>{o[e.dataset.f]=e.type==='checkbox'?e.checked:e.value;});
-  o.references=[...card.querySelectorAll('.ref')].filter(d=>d.dataset.added!=='1'&&d.dataset.path).map(d=>d.dataset.path);
-  o.references_add=PENDING[card.dataset.id]||[];return o;}
-async function regen(btn){const card=btn.closest('.card');const id=card.dataset.id;const f=cardFields(card);
-  if(CUR==='clips')f.sample=(VMODE==='sample');            // 视频：按当前子页出样片/成片
-  const res=await api('/api/regenerate',Object.assign({category:CUR,id},f));
-  if(!res.ok){toast('入队失败');return;}
-  PENDING[id]=[];toast('已加入生成队列：'+id);
-  const k=tkey(CUR,id),old=TASK[k]||{};                  // 乐观更新：立刻把卡片标成「排队中」，不等下一次轮询
-  const sp=Object.assign({},old.spec||{},f);
-  TASK[k]=Object.assign({},old,res.task||{status:'queued'},{category:CUR,item_id:id,spec:sp});
-  renderCards();poll(true);}                               // 强制重渲染（即使有输入框聚焦），再轮询看实时进度
-
-async function poll(force){let r=null;
-  if(POLL_T){clearTimeout(POLL_T);POLL_T=null;}   // 保证全程只有一条轮询链，避免每次手动 poll() 叠加成轮询风暴
-  try{
-    r=await api('/api/tasks');
-    const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);TOTS=r.totals;
-    updateTop(r);renderNav();
-    // 任务集合变化（AI 推送了新一批草稿、或某任务完成/失败）→ 重新拉 state，保证前端自动反映最新，无需手动刷新
-    const keys=r.tasks.map(t=>tkey(t.category,t.item_id)+':'+t.status).sort().join('|');
-    const keysetChanged=keys!==poll._keys;poll._keys=keys;
-    const justFinished=r.tasks.some(t=>{const p=prev[tkey(t.category,t.item_id)];return p&&p.status!==t.status&&(t.status==='done'||t.status==='failed');});
-    if(keysetChanged||justFinished){S=await api('/api/state');}
-    const sig=r.tasks.filter(t=>t.category===CUR).map(t=>t.item_id+':'+t.status+':'+(t.progress||'')+':'+(t.message||'')).join('|')
-      +'#'+(S.items[CUR]||[]).map(it=>it.id).join(',');
-    const changed=sig!==poll._last;poll._last=sig;
-    // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）；显式操作（force）则无视聚焦立即重渲染
-    const ae=document.activeElement;
-    const editing=!force&&ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
-    if((changed||justFinished||keysetChanged||force)&&!editing)renderCards();
-  }catch(e){/* 任何异常都不能中断轮询循环 */}
-  POLL_T=setTimeout(poll, (r&&r.generating)?1200:1800);   // 持续轮询：看进度 + 接住 AI 推送的草稿/参考图
-}
-function curStageCats(){const stg=(S.stages||[]).find(x=>x.cats.includes(CUR));return stg?stg.cats:[CUR];}
-function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
-  if(CUR==='clips'){   // 视频：一键生成本子页全部（样片或成片），不是只生成草稿
-    const cnt=(S.items.clips||[]).length;
-    gen.style.display=cnt?'inline-flex':'none';
-    gen.textContent=`▶ 一键生成${VMODE==='sample'?'样片':'成片'}（${cnt}）`;
-  }else{
-    const cats=curStageCats();   // 「开始生成」只作用于当前阶段
-    const sd=r.tasks.filter(x=>x.status==='draft'&&cats.includes(x.category)).length;
-    gen.style.display=sd?'inline-flex':'none';
-    gen.textContent=`▶ 开始生成（${sd}）`;
-  }
-  if(r.generating){pb.classList.remove('hide');
-    $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.canceled?' / '+t.canceled+' 已停':''}${t.failed?' / '+t.failed+' 失败':''}`;
-    $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-t.draft)*100):0)+'%';
-    $('#pcost').textContent='~'+r.cost_total+' 元';}
-  else{pb.classList.add('hide');
-    if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败（已自动重试），可在卡片上「重试」`;}}
-}
-async function generateAll(){
-  if(CUR==='clips'){const r=await api('/api/generate-clips',{sample:VMODE==='sample'});
-    toast(r.started?(`开始生成${VMODE==='sample'?'样片':'成片'} ${r.started} 段`):'没有可生成的视频片段（先让 AI 备好 clip 任务）');poll(true);return;}
-  const r=await api('/api/generate',{categories:curStageCats()});
-  toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll(true);}
-async function stopAll(){const r=await api('/api/stop',{});toast(r.stopped?(`已停止 ${r.stopped} 项（含进行中的任务）`):'没有可停止的任务');poll(true);}
-async function stopOne(btn){const card=btn.closest('.card');const id=card.dataset.id;
-  const r=await api('/api/stop',{category:CUR,id});toast(r.stopped?('已停止：'+id):'该任务不在排队/生成中');poll(true);}
-async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;
-  try{await api('/api/shutdown',{});}catch(e){}
-  document.body.innerHTML='<div style="height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--mut);gap:8px;text-align:center;padding:40px"><div style="font-size:34px">⏻</div><div style="color:var(--ink);font-size:16px;font-weight:600">本地服务已关闭</div><div style="font-size:13.5px">可以关闭此标签页了。需要时在对话里让我重新打开创作台即可。</div></div>';}
-function openSettings(){$('#scrim').classList.add('show');$('#drawer').classList.add('show');try{history.replaceState(null,'','#config');}catch(e){}}
-function closeSettings(){$('#scrim').classList.remove('show');$('#drawer').classList.remove('show');try{history.replaceState(null,'','#'+(CUR||''));}catch(e){}}
-async function saveKey(){const el=$('#apikey');const k=(el.value||'').trim();if(!k){toast('请粘贴 API Key');return;}
-  const r=await api('/api/key',{key:k});
-  if(!r.ok){toast('保存失败：'+(r.error||''));return;}
-  S=await api('/api/state');           // 立即刷新整页：设置、引导横幅、侧边栏、卡片
-  renderSettings();setGuide(CUR);renderNav();renderCards();
-  poll._last=null;poll._keys=null;     // 强制下个轮询也重画
-  const fails=Object.values(TASK).filter(t=>t.status==='failed').length;
-  toast('API Key 已保存'+(fails?`，可对 ${fails} 个失败项「重试」或重新「开始生成」`:'，可以开始生成了'));}
-function renderSettings(){const c=S.config,o=S.options;const sel=(f,list,val)=>`<select data-c="${f}">${opt(list,val)}</select>`;
-  const keyState=S.has_key?'<span style="color:var(--ok)">· 已配置</span>':'<span style="color:var(--no)">· 未配置，下面填入</span>';
-  const access=`<div class="grp" id="grp-access"><div class="t">接入与目录</div>
-     <div class="dfield"><label>工作目录（固定根目录）</label>
-       <div style="display:flex;gap:8px;align-items:center"><input type="text" value="${escA(S.project)}" readonly style="flex:1">
-       <a class="btn ghost sm" href="file://${S.project||''}" target="_blank">打开</a></div></div>
-     <div class="dfield"><label>API Key ${keyState}</label>
-       <div style="display:flex;gap:8px"><input type="password" id="apikey" placeholder="sk-…（粘贴后点保存，只写入 .sa_key）" style="flex:1">
-       <button class="btn sm" onclick="saveKey()">保存</button></div></div></div>`;
-  $('#dbody').innerHTML=access+`
-   <div class="grp"><div class="t">全局</div>
-     <div class="dfield"><label>画幅</label>${sel('ratio',o.ratios,c.ratio)}</div>
-     <div class="dfield"><label>视觉风格</label><input type="text" data-c="style" value="${escA(c.style)}" placeholder="如 写实电影感"></div></div>
-   <div class="grp"><div class="t">图像</div>
-     <div class="dfield"><label>图像模型</label>${sel('image.model',o.image_models,c.image.model)}</div></div>
-   <div class="grp"><div class="t">视频</div>
-     <div class="dfield"><label>视频模型</label>${sel('video.model',o.video_models,c.video.model)}</div>
-     <div class="dfield"><label>样片分辨率</label>${sel('video.resolution_sample',o.resolutions,c.video.resolution_sample)}</div>
-     <div class="dfield"><label>成片分辨率</label>${sel('video.resolution_final',o.resolutions,c.video.resolution_final)}</div>
-     <div class="dfield"><label>默认时长(秒)</label><input type="number" data-c="video.duration_default" min="4" max="15" value="${c.video.duration_default}"></div>
-     <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.generate_audio" ${c.video.generate_audio?'checked':''}> 生成音轨</label></div>
-     <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.watermark" ${c.video.watermark?'checked':''}> 水印</label></div></div>`;
-  $('#dbody').querySelectorAll('[data-c]').forEach(e=>e.addEventListener('change',saveSettings));}
-function setDeep(o,path,val){const ks=path.split('.');let cur=o;for(let i=0;i<ks.length-1;i++){cur[ks[i]]=cur[ks[i]]||{};cur=cur[ks[i]];}cur[ks[ks.length-1]]=val;}
-async function saveSettings(){const cfg={};
-  $('#dbody').querySelectorAll('[data-c]').forEach(e=>{let v;if(e.type==='checkbox')v=e.checked;else if(e.type==='number')v=parseFloat(e.value)||0;else v=e.value;setDeep(cfg,e.dataset.c,v);});
-  const res=await api('/api/config',{config:cfg});if(res.ok){S.config=res.config;toast('配置已更新');}}
-
-load();
-</script>
-</body></html>"""
 
 
 def daemonize(logpath):
@@ -1375,6 +906,10 @@ def main():
     if args.plan and os.path.exists(args.plan):
         with open(args.plan, encoding="utf-8") as f:
             plan = json.load(f)
+        if plan.get("story"):
+            state = Handler.rs.load()
+            pu.apply_plan_meta(state, plan)
+            Handler.rs.save(state)
         for spec in plan.get("tasks", []):
             if spec.get("category") and spec.get("id"):
                 Handler.gq.enqueue(spec, start=False)

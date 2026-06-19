@@ -1,4 +1,4 @@
-# 本 skill 的脚本主要依赖 Python 标准库（urllib/base64/json…）。
+# 本 skill 的脚本主要依赖 Python 标准库（urllib/base64/json…）。需要 Python 3.9+。
 # 可选依赖：
 #   Pillow  —— 多角色/场景分镜把多张参考图拼成一张「参考拼贴」喂给单参考图的图像 API（gen_image）。
 #             缺失时自动回退为只用第一张参考图。

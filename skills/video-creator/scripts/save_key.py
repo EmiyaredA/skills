@@ -26,11 +26,8 @@ def main():
     if not key:
         raise SystemExit("空 Key")
 
-    kp = pu.key_path(args.project)
-    with open(kp, "w", encoding="utf-8") as f:
-        f.write(key)
-    os.chmod(kp, 0o600)
-    print(f"已写入密钥文件：{kp}（已加入 .gitignore，请勿提交）")
+    pu.save_project_key(args.project, key)
+    print(f"已写入密钥文件：{pu.key_path(args.project)}（已加入 .gitignore，请勿提交）")
 
 
 if __name__ == "__main__":

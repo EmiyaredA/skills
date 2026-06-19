@@ -28,6 +28,26 @@ SUBDIRS = [
     ("docs",       "docs",              "文稿", "📄"),      # 剧本 / 说明
 ]
 
+# 流水线分类与阶段（serve_review / status 共用）
+PIPELINE_CATEGORIES = [
+    {"key": "characters", "label": "角色三视图", "icon": "user", "kind": "image", "stage": 1},
+    {"key": "scenes", "label": "场景", "icon": "photo", "kind": "image", "stage": 1},
+    {"key": "shots", "label": "分镜机位", "icon": "clapperboard", "kind": "image", "stage": 2},
+    {"key": "clips", "label": "视频片段", "icon": "movie", "kind": "video", "stage": 3},
+    {"key": "exports", "label": "成片导出", "icon": "film", "kind": "video", "stage": 4},
+]
+STAGE_OF = {c["key"]: c["stage"] for c in PIPELINE_CATEGORIES}
+STAGES = [
+    {"n": 1, "label": "设定", "cats": [c["key"] for c in PIPELINE_CATEGORIES if c["stage"] == 1]},
+    {"n": 2, "label": "分镜", "cats": [c["key"] for c in PIPELINE_CATEGORIES if c["stage"] == 2]},
+    {"n": 3, "label": "成片", "cats": [c["key"] for c in PIPELINE_CATEGORIES if c["stage"] == 3]},
+    {"n": 4, "label": "导出", "cats": [c["key"] for c in PIPELINE_CATEGORIES if c["stage"] == 4]},
+]
+STAGE_LABEL = {1: "设定(人设+场景)", 2: "分镜", 3: "成片(视频)", 4: "导出"}
+RATIOS = ["16:9", "9:16", "4:3", "3:4", "1:1"]
+RESOLUTIONS = ["480p", "720p", "1080p"]
+IMAGE_TYPE_KEYS = {"character": "characters", "scene": "scenes", "shot": "shots"}
+
 
 def subdir(project, key):
     """取某类资产的固定子目录绝对路径。key 见 SUBDIRS 第一列。"""
@@ -257,3 +277,95 @@ def character_image(state, cid):
 def scene_image(state, sid):
     s = find(state.get("scenes", []), sid)
     return s.get("image") if s else None
+
+
+def parse_id_list(val):
+    """把逗号分隔字符串或 id 列表规范为字符串列表。"""
+    if not val:
+        return []
+    if isinstance(val, str):
+        return [s.strip() for s in val.split(",") if s.strip()]
+    return [str(s).strip() for s in val if s and str(s).strip()]
+
+
+def normalize_plan_task(spec):
+    """plan 任务入队前一次性规范化字段名与形态。"""
+    spec = dict(spec)
+    if not spec.get("references") and spec.get("reference"):
+        r = spec["reference"]
+        spec["references"] = [r] if isinstance(r, str) else list(r)
+    spec.pop("reference", None)
+    if not spec.get("shots") and spec.get("shot"):
+        spec["shots"] = spec["shot"]
+    spec.pop("shot", None)
+    if isinstance(spec.get("characters"), list):
+        spec["characters"] = ",".join(spec["characters"])
+    if isinstance(spec.get("shots"), list):
+        spec["shots"] = ",".join(spec["shots"])
+    if isinstance(spec.get("order"), list):
+        spec["order"] = ",".join(spec["order"])
+    return spec
+
+
+def resolve_generation_refs(state, category, spec):
+    """分镜/视频生成前补全 references 与 characters（单一事实来源）。"""
+    if category not in ("shots", "clips"):
+        return spec
+    refs = list(spec.get("references") or [])
+    if category == "clips":
+        for sid in parse_id_list(spec.get("shots")):
+            it = find(state.get("shots", []), sid)
+            img = it.get("image") if it else None
+            if img and img not in refs:
+                refs.insert(0, img)
+    named = parse_id_list(spec.get("characters"))
+    ref_ids = named or [c["id"] for c in state.get("characters", [])]
+    if category == "clips" and not named and ref_ids:
+        spec["characters"] = ",".join(ref_ids)
+    for cid in ref_ids:
+        img = character_image(state, cid)
+        if img and img not in refs:
+            refs.append(img)
+    if category == "shots" and spec.get("scene"):
+        simg = scene_image(state, spec["scene"])
+        if simg and simg not in refs:
+            refs.append(simg)
+    if refs:
+        spec["references"] = refs
+    return spec
+
+
+def apply_style(prompt, style):
+    """把项目级视觉风格追加到提示词。"""
+    style = (style or "").strip()
+    return f"{prompt}。【整体视觉风格：{style}，全片统一】" if style else prompt
+
+
+def resolve_asset_path(project, ref):
+    """项目内相对路径 → 绝对路径；URL/data/绝对路径原样返回。"""
+    if not ref or ref.startswith(("http://", "https://", "data:", "/")):
+        return ref
+    return os.path.join(project, ref)
+
+
+def save_project_key(project, key):
+    """写入项目 .sa_key 并设权限。"""
+    kp = key_path(project)
+    with open(kp, "w", encoding="utf-8") as f:
+        f.write(key)
+    try:
+        os.chmod(kp, 0o600)
+    except OSError:
+        pass
+    os.environ["SENSEAUDIO_KEY_FILE"] = kp
+
+
+def apply_plan_meta(state, plan_body):
+    """把 plan 顶层的 story 元数据同步进 state（可选）。"""
+    story = (plan_body or {}).get("story")
+    if not story or not isinstance(story, dict):
+        return
+    st = state.setdefault("story", {"logline": "", "summary": "", "beats": []})
+    for k in ("logline", "summary", "beats"):
+        if k in story:
+            st[k] = story[k]

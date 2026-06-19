@@ -20,21 +20,17 @@
 
 ## 剧情拆 clip 与时长（助手必做）
 
-收到用户一整段视频/剧情需求时：
+收到用户一整段视频/剧情需求时：先拆节拍 → 每节拍 1 个 `shot` + 1 个 `clip`；边界选硬切友好切点；**禁止**相邻 clip 设计成须丝滑衔接的连续长镜头。
 
-1. **先拆节拍** → 每个节拍 1 个 `shot` + 1 个 `clip`（id 对齐）。
-2. **边界选硬切友好的切点**：换景别、换机位、换场景、反应镜头、动作完成、对白结束——**不要**把同一条长镜头切成上下两段。
-3. **`duration` 只取 5 / 10 / 15**（写进任务字段，不进 prompt）：
+`duration` **推荐** 5/10/15 秒（写进任务字段，不进 prompt；API/UI 支持 4–15）：
 
 | 秒数 | 典型内容 |
 |------|----------|
 | 5 | 单动作/单表情/空镜/一句短对白 |
-| 10 | 一小段完整节拍（两个简单动作或短对话） |
-| 15 | 一个主节拍内信息稍多（仍勿塞多场戏） |
+| 10 | 一小段完整节拍 |
+| 15 | 一个主节拍内信息稍多 |
 
-4. 信息量大 → **加 clip 数**，不要拉长单个 clip 或指望 `continue_prev` 续接。
-
-**禁止：** clip_A 结尾与 clip_B 开头是同一机位同一动作的上下半段；用户要「长镜头感」→ 用多个**不同机位/景别**的 clip 剪接出节奏，而非分段生成一条连续镜头。
+信息量大 → **加 clip 数**，不要拉长单个 clip。默认不用 `continue_prev`。
 
 ## 跨角色画风统一（风格基准图）
 
@@ -42,12 +38,12 @@
 
 ```bash
 # 1) 先做女孩（基准），锁性别 —— 默认单张三视图合图，不要 --views
-python gen_image.py --project P --type character --id char_01 --name 女孩 --gender 女 \
+python scripts/gen_image.py --project P --type character --id char_01 --name 女孩 --gender 女 \
     --prompt "黑长直，校服，二次元3D渲染风格，单张角色三视图设定图"
 
 # 2) 男孩参考女孩出同款画风
-python gen_image.py --project P --type character --id char_02 --name 男孩 --gender 男 \
-    --prompt "短发，校服，单张角色三视图设定图" --style-ref char_01
+python scripts/gen_image.py --project P --type character --id char_02 --name 男孩 --gender 男 \
+    --prompt "短发，校服，单张角色三视图设定图" --style-ref char_01 --build "比女孩高一头"
 ```
 `--style-ref` 会把基准图作参考，并自动追加"与参考图保持同一画风"。`--gender` 写进身份锚点，**防止性别生成错**（如男主出成女生）。
 
@@ -68,27 +64,25 @@ python gen_image.py --project P --type character --id char_02 --name 男孩 --ge
 
 ```bash
 # 视频参考分镜图 shot_03 + 出场角色设定图（不用首尾帧）
-python gen_video.py --project P --id clip_03 --characters char_01,char_02 \
+python scripts/gen_video.py --project P --id clip_03 --characters char_01,char_02 \
     --prompt "天台上，男孩把便当递给女孩；男主比女主高一头" --shots shot_03 --sample
 ```
-`--characters` 会：① 把每个角色的性别/发型/服装/瞳色/体型等身份锚点重申进 prompt（强约束"不得增减或替换角色"）；② 把各角色设定图都作参考图。`--shots` 把分镜图作参考。分镜机位图 `gen_image --type shot --characters ...` 同理（单参考图时多张会拼成参考拼贴）。
+`--characters` / `--shots` 行为详见 [generation-modes.md](generation-modes.md)。
 
 > 反馈里出现"性别错/衣服对不上/角色消失或重复"时：重做该镜，务必带上 `--characters`（视频）或 `--reference`（图像），并在 prompt 里写清"画面共 N 人：谁和谁，各自在做什么"。
 
 ## 一致性清单
-- 角色：每次都复用同一份三视图/正面图作参考，固定身份锚点措辞；新角色用 `--style-ref` 对齐画风，`--gender` 锁性别。
-- 多角色镜头：视频用 `--characters` 注入全部角色锚点+参考图；prompt 写清人数与各自动作。
-- 场景：复用场景图作参考，保持色调与光源描述一致。
-- 跨镜：视频以分镜图作参考（`--shots`），构图/内容随分镜走（见 [generation-modes.md](generation-modes.md)）。
-- 画幅与风格：整部短剧统一 `ratio` 与风格词。**`state.config.style`（设置面板「视觉风格」）会自动追加到每条图像/视频提示词**（如「整体视觉风格：日系治愈手绘风，全片统一」），无需在每条 prompt 里手写；想统一改风格只改这一处。
+- 角色：复用三视图作参考；新角色用 `--style-ref` 对齐画风，`--gender`/`--build` 锁身份与比例。
+- 多角色镜头：视频用 `--characters`；分镜用 `--characters` + 场景（多图自动拼贴）。
+- 跨镜：视频以分镜图作参考（`--shots`）。
+- 画幅与风格：统一 `ratio`；`config.style` 自动追加到每条 prompt（无需手写）。
 
-> ⚠️ **配置信息一律不要写进提示词**：画幅（竖屏/9:16/16:9）、分辨率（480p/1080p）、时长（几秒）、样片/成片 等都由**配置或任务字段**控制、用户在设置/卡片里可随时调，写进提示词既多余又可能与配置打架（如「5秒竖屏短剧样片，…」开头应删掉）。提示词只描述画面内容、动作、镜头、光线、风格。
-> 注意区分两种「比例」：**画幅比例（9:16，属配置）** ≠ **人物/场景大小比例（如「男主比女主高一头」「头顶到门框三分之二」，属提示词内容）**。前者别写进提示词，后者要写。
+> 配置信息（画幅、分辨率、时长、样片/成片）由任务字段或设置面板控制，**不要写进提示词**。人物/场景大小比例属于提示词内容。
 
-## 反面清单（容易翻车）
-- 一个 clip 塞多个主节拍 / 多场戏 → 拆成多个 clip，或加长到 10s/15s 但仍只保留**一个**主节拍。
-- 相邻 clip 设计成连续长镜头的上下段 → 改为独立硬切镜头（换景别/机位/场景）。
-- 一个镜头塞多个主要动作 → 拆成多个 clip。
-- 角色数量过多（>4）→ 一致性骤降。
-- 视频混用首/尾帧 + 参考图 → API 报 400「首尾帧和参考素材不能混用」；本 skill 只用参考图驱动。
-- 样片就上 1080p → 浪费积分，先 480p。
+## 反面清单
+- 一个 clip 塞多个主节拍 → 拆 clip 或加长到 10s/15s 但仍只保留一个主节拍。
+- 相邻 clip 设计成连续长镜头上下段 → 改独立硬切镜头。
+- 视频混用首/尾帧 + 参考图 → API 400；本 skill 只用参考图驱动。
+- 样片就上 1080p → 先 480p 样片确认。
+
+视频模式与 API 约束详见 [generation-modes.md](generation-modes.md)。

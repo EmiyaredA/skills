@@ -187,7 +187,7 @@ def composite_reference(paths, dest, cell_h=512, pad=14, bg=(245, 245, 247)):
 
 # ---------- 图像 ----------
 
-def image_sync(model, prompt, size=None, reference=None, seed=None):
+def _image_body(model, prompt, size=None, reference=None, seed=None):
     body = {"model": model, "prompt": prompt}
     if size:
         body["size"] = size
@@ -195,7 +195,11 @@ def image_sync(model, prompt, size=None, reference=None, seed=None):
         body["reference"] = as_url(reference)
     if seed is not None:
         body["seed"] = seed
-    resp = _request("POST", "/v1/image/sync", body)
+    return body
+
+
+def image_sync(model, prompt, size=None, reference=None, seed=None):
+    resp = _request("POST", "/v1/image/sync", _image_body(model, prompt, size, reference, seed))
     url = resp.get("url")
     if not url:
         raise APIError(f"image/sync 未返回 url：{resp}")
@@ -203,14 +207,7 @@ def image_sync(model, prompt, size=None, reference=None, seed=None):
 
 
 def image_async(model, prompt, size=None, reference=None, seed=None, poll_interval=4, max_wait=600):
-    body = {"model": model, "prompt": prompt}
-    if size:
-        body["size"] = size
-    if reference:
-        body["reference"] = as_url(reference)
-    if seed is not None:
-        body["seed"] = seed
-    resp = _request("POST", "/v1/image/async", body)
+    resp = _request("POST", "/v1/image/async", _image_body(model, prompt, size, reference, seed))
     task_id = resp.get("task_id")
     if not task_id:
         raise APIError(f"image/async 未返回 task_id：{resp}")

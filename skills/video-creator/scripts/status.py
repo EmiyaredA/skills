@@ -14,10 +14,9 @@ import os
 import project_utils as pu
 import ensure_env as env
 
-# (分类key, 显示名, 阶段)
-CATS = [("characters", "角色三视图", 1), ("scenes", "场景", 1),
-        ("shots", "分镜机位", 2), ("clips", "视频片段", 3), ("exports", "成片导出", 4)]
-STAGE_LABEL = {1: "设定(人设+场景)", 2: "分镜", 3: "成片(视频)", 4: "导出"}
+# (分类key, 显示名, 阶段) — 从 project_utils 单一来源派生
+CATS = [(c["key"], c["label"], c["stage"]) for c in pu.PIPELINE_CATEGORIES]
+STAGE_LABEL = pu.STAGE_LABEL
 
 
 def _done(cat, it):

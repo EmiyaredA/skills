@@ -20,10 +20,6 @@ RATIO_DIMS = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080),
               "4:3": (1440, 1080), "3:4": (1080, 1440)}
 
 
-def has_ffmpeg():
-    return env.has_ffmpeg()
-
-
 def has_audio(path):
     try:
         out = subprocess.run(
@@ -70,7 +66,7 @@ def main():
     args = ap.parse_args()
 
     state = pu.load_state(args.project)
-    if not has_ffmpeg():
+    if not env.has_ffmpeg():
         print("未检测到 ffmpeg/ffprobe，尝试自动安装…", flush=True)
         ok, _, msgs = env.ensure(["ffmpeg"], install=True)
         for m in msgs:

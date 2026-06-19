@@ -110,15 +110,13 @@ def install_pillow():
     return False, err or "pip install Pillow 失败"
 
 
-def resolve_deps(export=False, image=False, all_deps=False):
-    if all_deps or (not export and not image):
-        return ["ffmpeg", "pillow"]
+def resolve_deps(export=False, image=False):
     names = []
-    if export or all_deps:
+    if export:
         names.append("ffmpeg")
-    if image or all_deps:
+    if image:
         names.append("pillow")
-    return names or ["ffmpeg", "pillow"]
+    return names
 
 
 def ensure(names, install=False):
