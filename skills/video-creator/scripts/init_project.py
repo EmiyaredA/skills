@@ -30,7 +30,7 @@ def main():
     ap.add_argument("--parent", default=None,
                     help="总工作目录：在其下自动新建唯一子目录作为本轮项目（隔离不同对话）")
     ap.add_argument("--title", default="", help="作品标题")
-    ap.add_argument("--ratio", default="9:16", choices=["16:9", "9:16", "4:3", "3:4", "1:1"])
+    ap.add_argument("--ratio", default="16:9", choices=["16:9", "9:16", "4:3", "3:4", "1:1"])
     ap.add_argument("--style", default="", help="整体视觉风格，如『写实电影感』")
     ap.add_argument("--config", default=None, help="可选：一个配置 JSON（预设），应用到 config；一般不用，配置在应用「设置」里改")
     args = ap.parse_args()

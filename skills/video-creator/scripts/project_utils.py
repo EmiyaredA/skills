@@ -45,17 +45,17 @@ def now_iso():
 def default_config():
     """全局生成配置。用户在实时应用「设置」面板里修改（/api/config → apply_config）。"""
     return {
-        "ratio": "9:16",
+        "ratio": "16:9",
         "style": "",
         "image": {
-            "model_final": "senseaudio-image-2.0-260319",
-            "model_sample": "senseaudio-image-1.0-260319",
+            "model_final": "senseaudio-image-2.0-260319",   # 默认用效果最佳/最贵的
+            "model_sample": "senseaudio-image-2.0-260319",
             "use_async": False,
         },
         "video": {
             "model": "doubao-seedance-2-0-260128",
             "resolution_sample": "480p",
-            "resolution_final": "1080p",
+            "resolution_final": "720p",
             "duration_default": 5,
             "generate_audio": True,
             "watermark": True,

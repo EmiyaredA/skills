@@ -221,6 +221,8 @@ class GenQueue:
     def enqueue(self, spec, start=True):
         """加入任务。start=True 立即排队生成；start=False 仅作为「待生成」草稿（AI 备好、等用户在 UI 点生成）。"""
         spec = self._norm(dict(spec))
+        # 入队即解析分镜/视频的参考图（人设/场景/分镜图）——草稿卡片立刻就能看到用了哪些参考图，无需等"开始生成"
+        self._resolve_refs(spec, spec.get("category"))
         with self.lock:
             k = self._key(spec)
             self.specs[k] = spec
@@ -326,10 +328,19 @@ class GenQueue:
             st = pu.load_state(self.project)
         except Exception:
             return spec
+        refs = list(spec.get("references") or [])
+        # 视频片段：把对应分镜图作参考（放最前）
+        if key == "clips":
+            sh = spec.get("shots") or spec.get("shot") or ""
+            sids = sh.split(",") if isinstance(sh, str) else list(sh)
+            for sid in [s.strip() for s in sids if s and str(s).strip()]:
+                it = pu.find(st.get("shots", []), sid)
+                img = it.get("image") if it else None
+                if img and img not in refs:
+                    refs.insert(0, img)
         named = [c.strip() for c in (spec.get("characters") or "").split(",") if c.strip()]
         # 解析参考图用的角色：AI 指定了就用指定的；没指定则退化到全体角色（仅作视觉参考）
         ref_ids = named or [c["id"] for c in st.get("characters", [])]
-        refs = list(spec.get("references") or [])
         for cid in ref_ids:
             img = pu.character_image(st, cid)
             if img and img not in refs:
@@ -338,11 +349,9 @@ class GenQueue:
             simg = pu.scene_image(st, spec["scene"])
             if simg and simg not in refs:
                 refs.append(simg)
-        with self.lock:
-            if refs:
-                spec["references"] = refs   # 始终给视觉参考（卡片可见、生成可用）
-            # 不自动写 characters：身份锚点只作用于 AI 明确点名的出场角色，
-            # 避免把没点名的全体角色强行"锁进画面"（单人镜头会被塞进多人）
+        if refs:
+            spec["references"] = refs   # 始终给视觉参考（卡片可见、生成可用；单次赋值，读取方拿到的总是完整列表）
+        # 不自动写 characters：身份锚点只作用于 AI 明确点名的出场角色
         return spec
 
     def _exec(self, t, spec):
@@ -764,7 +773,7 @@ textarea{resize:vertical;min-height:62px}
 textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
 .refs{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 .ref{position:relative;width:66px;height:66px;border-radius:11px;overflow:hidden;border:1px solid var(--line2);transition:.15s}.ref:hover{border-color:var(--accent)}
-.ref img{width:100%;height:100%;object-fit:cover;cursor:zoom-in}.ref.removed{opacity:.32;filter:grayscale(1)}
+.ref img{width:100%;height:100%;object-fit:cover;cursor:zoom-in}
 .ref .rx{position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.62);color:#fff;font-size:11px;line-height:20px;border:0;cursor:pointer;text-align:center;transition:.12s}.ref .rx:hover{background:var(--no)}
 .ref-up{width:66px;height:66px;flex:none;border-radius:11px;border:1px dashed var(--line2);color:var(--mut);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;transition:.15s}.ref-up:hover{color:var(--accent);border-color:var(--accent)}
 .ref-up .ru-ic{font-size:18px;line-height:1}.ref-up .ru-t{font-size:11px;line-height:1}
@@ -816,7 +825,6 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
     <div class="brand"><i></i><span id="brand">短剧项目</span></div>
     <nav id="nav"></nav>
     <div class="side-foot">
-      <a class="side-btn" id="wdlink" href="#" target="_blank"><span class="ico">📂</span>打开工作目录</a>
       <div class="side-btn" onclick="openSettings()"><span class="ico">⚙</span>设置（配置）</div>
       <div class="side-btn danger" onclick="shutdownApp()"><span class="ico">⏻</span>关闭服务</div>
     </div>
@@ -866,7 +874,6 @@ function tkey(cat,id){return cat+'::'+id;}
 
 async function load(){S=await api('/api/state');
   $('#brand').textContent=S.title;
-  $('#wdlink').href=S.project?('file://'+S.project):'#';
   renderSettings();
   const first=S.categories.find(c=>c.count>0)||S.categories[0];
   CUR=first.key; renderNav(); renderCards();
@@ -949,7 +956,7 @@ function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
   else if(st==='draft') mediaArea='<div class="skeleton">（待生成 · 确认后点「生成」）</div>';
   else{const m=(it.media||[]).map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
     mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
-  const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="toggleRef(this)">✕</button></div>`).join('');
+  const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button></div>`).join('');
   const editBlock=isVoice?'':`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${it.prompt||''}</textarea>
     <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
   const okOn=it.decision!=='需修改';
@@ -998,15 +1005,18 @@ function pickFile(path){if(!PICK_CARD){closePicker();return;}
   const wrap=PICK_CARD.querySelector('.refs'),up=wrap.querySelector('.ref-up');
   if([...wrap.querySelectorAll('.ref')].some(d=>d.dataset.path===path)){closePicker();toast('已在参考图里');return;}
   const d=document.createElement('div');d.className='ref';d.dataset.path=path;d.dataset.removed='0';
-  d.innerHTML=`<img src="/media?path=${encodeURIComponent(path)}" onclick="zoom('/media?path=${encodeURIComponent(path)}','ref')"><button class="rx" onclick="toggleRef(this)">✕</button>`;
+  d.innerHTML=`<img src="/media?path=${encodeURIComponent(path)}" onclick="zoom('/media?path=${encodeURIComponent(path)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button>`;
   wrap.insertBefore(d,up);closePicker();toast('已添加参考图：'+path);}
-function toggleRef(b){const d=b.parentElement;const r=d.dataset.removed==='1'?'0':'1';d.dataset.removed=r;d.classList.toggle('removed',r==='1');}
+function removeRef(btn){const d=btn.closest('.ref');if(!d)return;
+  if(d.dataset.added==='1'){const card=btn.closest('.card');const id=card&&card.dataset.id;const img=d.querySelector('img');
+    const arr=PENDING[id]||[];const i=img?arr.indexOf(img.getAttribute('src')):-1;if(i>=0)arr.splice(i,1);}
+  d.remove();}
 const PENDING={};
 function addImageFile(card,f){if(!card||!f)return;const id=card.dataset.id;PENDING[id]=PENDING[id]||[];
   const rd=new FileReader();rd.onload=()=>{PENDING[id].push(rd.result);
     const wrap=card.querySelector('.refs'),up=wrap.querySelector('.ref-up');
     const d=document.createElement('div');d.className='ref';d.dataset.added='1';d.dataset.removed='0';
-    d.innerHTML=`<img src="${rd.result}" onclick="zoom('${rd.result}','paste')"><button class="rx" onclick="toggleRef(this)">✕</button>`;
+    d.innerHTML=`<img src="${rd.result}" onclick="zoom('${rd.result}','paste')"><button class="rx" onclick="removeRef(this)">✕</button>`;
     wrap.insertBefore(d,up);};rd.readAsDataURL(f);}
 function addRefs(input){const card=input.closest('.card');[...input.files].forEach(f=>addImageFile(card,f));input.value='';}
 // 记录“当前活动卡片”，支持 Ctrl+V 粘贴图片到该卡片
@@ -1022,29 +1032,32 @@ function decide(btn,val){const seg=btn.parentElement;seg.querySelectorAll('butto
   const card=btn.closest('.card');card.classList.toggle('rev',val==='需修改');
   api('/api/decision',{category:CUR,id:card.dataset.id,decision:val,note:card.querySelector('[data-f=note]').value});}
 function cardFields(card){const o={};card.querySelectorAll('[data-f]').forEach(e=>{o[e.dataset.f]=e.type==='checkbox'?e.checked:e.value;});
-  o.references=[...card.querySelectorAll('.ref')].filter(d=>d.dataset.added!=='1'&&d.dataset.removed!=='1').map(d=>d.dataset.path);
+  o.references=[...card.querySelectorAll('.ref')].filter(d=>d.dataset.added!=='1'&&d.dataset.path).map(d=>d.dataset.path);
   o.references_add=PENDING[card.dataset.id]||[];return o;}
 async function regen(btn){const card=btn.closest('.card');const id=card.dataset.id;const f=cardFields(card);
   const res=await api('/api/regenerate',Object.assign({category:CUR,id},f));
   if(!res.ok){toast('入队失败');return;}
   PENDING[id]=[];toast('已加入生成队列：'+id);poll();}
 
-async function poll(){let r;try{r=await api('/api/tasks');}catch(e){setTimeout(poll,2500);return;}
-  const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);TOTS=r.totals;
-  updateTop(r);renderNav();
-  // 任务集合变化（AI 推送了新一批草稿、或某任务完成/失败）→ 重新拉 state，保证前端自动反映最新，无需手动刷新
-  const keys=r.tasks.map(t=>tkey(t.category,t.item_id)+':'+t.status).sort().join('|');
-  const keysetChanged=keys!==poll._keys;poll._keys=keys;
-  const justFinished=r.tasks.some(t=>{const p=prev[tkey(t.category,t.item_id)];return p&&p.status!==t.status&&(t.status==='done'||t.status==='failed');});
-  if(keysetChanged||justFinished){try{S=await api('/api/state');}catch(e){}}
-  const sig=r.tasks.filter(t=>t.category===CUR).map(t=>t.item_id+':'+t.status+':'+(t.progress||'')+':'+(t.message||'')).join('|')
-    +'#'+(S.items[CUR]||[]).map(it=>it.id).join(',');
-  const changed=sig!==poll._last;poll._last=sig;
-  // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）
-  const ae=document.activeElement;
-  const editing=ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
-  if((changed||justFinished||keysetChanged)&&!editing)renderCards();
-  setTimeout(poll, r.generating?1200:2500);   // 持续轮询：既看进度，也接住 AI 后续推送的待生成任务
+async function poll(){let r=null;
+  try{
+    r=await api('/api/tasks');
+    const prev=TASK;TASK={};r.tasks.forEach(t=>TASK[tkey(t.category,t.item_id)]=t);TOTS=r.totals;
+    updateTop(r);renderNav();
+    // 任务集合变化（AI 推送了新一批草稿、或某任务完成/失败）→ 重新拉 state，保证前端自动反映最新，无需手动刷新
+    const keys=r.tasks.map(t=>tkey(t.category,t.item_id)+':'+t.status).sort().join('|');
+    const keysetChanged=keys!==poll._keys;poll._keys=keys;
+    const justFinished=r.tasks.some(t=>{const p=prev[tkey(t.category,t.item_id)];return p&&p.status!==t.status&&(t.status==='done'||t.status==='failed');});
+    if(keysetChanged||justFinished){S=await api('/api/state');}
+    const sig=r.tasks.filter(t=>t.category===CUR).map(t=>t.item_id+':'+t.status+':'+(t.progress||'')+':'+(t.message||'')).join('|')
+      +'#'+(S.items[CUR]||[]).map(it=>it.id).join(',');
+    const changed=sig!==poll._last;poll._last=sig;
+    // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）
+    const ae=document.activeElement;
+    const editing=ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
+    if((changed||justFinished||keysetChanged)&&!editing)renderCards();
+  }catch(e){/* 任何异常都不能中断轮询循环 */}
+  setTimeout(poll, (r&&r.generating)?1200:1800);   // 持续轮询：看进度 + 接住 AI 推送的草稿/参考图
 }
 function curStageCats(){const stg=(S.stages||[]).find(x=>x.cats.includes(CUR));return stg?stg.cats:[CUR];}
 function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
