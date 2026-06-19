@@ -41,9 +41,11 @@ def main():
         print(f"\n[项目汇总] 图像约 {n_img} 张：~{img_cost:.2f}元")
         total += img_cost
         for cl in state.get("clips", []):
-            c = sa.estimate_video(cl.get("resolution", "720p"), cl.get("duration", 5))
+            part = cl.get("final") or cl.get("sample") or {}   # 样片/成片分档存储，优先成片估价
+            res, dur = part.get("resolution", "720p"), part.get("duration", 5)
+            c = sa.estimate_video(res, dur)
             total += c
-            print(f"  视频 {cl['id']} {cl.get('resolution')} {cl.get('duration')}s：~{c:.2f}元")
+            print(f"  视频 {cl['id']} {res} {dur}s：~{c:.2f}元")
 
     print(f"\n合计参考成本：~{total:.2f}元")
     print("提示：先用 480p 样片确认效果，再升 720p/1080p 出成片，可显著省积分。")

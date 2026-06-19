@@ -28,11 +28,13 @@
   （常驻启动加 --daemon：脚本自行双 fork 脱离会话，启动命令瞬间返回、服务独立存活，见 SKILL.md 启动协议）
 
 plan.json 形如：{"tasks":[
-  {"category":"characters","id":"char_01","name":"林夏","prompt":"...","gender":"女","views":"front,side,back","sample":true},
+  {"category":"characters","id":"char_01","name":"林夏","prompt":"...","gender":"女"},
   {"category":"scenes","id":"scene_01","name":"便利店","prompt":"..."},
   {"category":"shots","id":"shot_01","prompt":"...","characters":"char_01","scene":"scene_01"},
-  {"category":"clips","id":"clip_01","prompt":"...","shots":"shot_01","characters":"char_01","resolution":"480p","duration":5,"sample":true}
+  {"category":"clips","id":"clip_01","prompt":"...","shots":"shot_01","characters":"char_01","duration":5},
+  {"category":"exports","id":"export_01","title":"成片","order":"clip_01,clip_02"}
 ]}
+  （clips 不用写 sample/分辨率——出样片还是成片由用户在「样片生成/成片生成」子页触发时决定）
 """
 import argparse
 import json
@@ -461,13 +463,14 @@ class ReviewState:
             return {"media": media, "status": p.get("status", "draft"),
                     "resolution": p.get("resolution", ""), "duration": p.get("duration", "")}
         inp = cl.get("inputs", {})
+        dur = (cl.get("final") or cl.get("sample") or {}).get("duration", 5)
         return {"id": cl["id"], "title": cl["id"], "meta": cl.get("mode", ""),
                 "prompt": cl.get("prompt", ""), "model": cl.get("model", ""),
-                "duration": cl.get("duration", 5), "ratio": cl.get("ratio", ""),
+                "duration": dur, "ratio": cl.get("ratio", ""),
                 "references": _ref_list(inp.get("reference", [])),
                 "sample": part("sample"), "final": part("final"),
                 "decision": cl.get("review_decision", "通过"),
-                "note": cl.get("review_note", ""), "status": cl.get("review_status", "draft")}
+                "note": cl.get("review_note", ""), "status": cl.get("status", "draft")}
 
     def _export_item(self, e):
         src = e.get("local_path") or e.get("video_url")

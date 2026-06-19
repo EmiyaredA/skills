@@ -135,19 +135,21 @@ license: Complete terms in LICENSE.txt
 把故事拆成一组**分镜机位图**（每镜一张），自动参考阶段1 的人设图+场景图，prompt 里写清景别/机位/动作/**比例**。
 分镜确认后进入阶段3——**视频以分镜图作参考生成**（不用首/尾帧）。详见 [references/generation-modes.md](references/generation-modes.md)。
 
-## 阶段 3：样片 → 成片
+## 阶段 3：视频片段（样片生成 / 成片生成 两个子页）
 
-先低配样片验证，再出成片，避免浪费积分。
+视频片段在侧边栏拆成 **「样片生成」「成片生成」两个子页**；**样片(480p)与成片(720p/1080p)各自独立保留**，互不覆盖。
 
-1. **先问用户**：先出低配样片确认，还是需求已清楚直接出成片？给成本对比：
+1. **你（AI）按剧情把 `clips` 任务备好**（带 `shots`、`characters`、`duration`，**不要带画幅/分辨率/样片标记进提示词**）`POST /api/plan`，并在对话里跟用户说明已备好哪些片段。
+   > clip 任务**不用写 `sample`**——出样片还是成片由用户在对应子页触发时决定。
+2. **用户自己选**：在「样片生成」子页点「**一键生成样片**」先出 480p 快速预览；不满意就让你调该片段的提示词/参考图（你改 plan 重推或用户在卡片改），重出样片。
+3. 满意后到「成片生成」子页点「**一键生成成片**」出高清（也可只对某张卡片单独「生成成片」）。两个子页可分别一键，也可都点。
+4. 成本对比可给：
    ```bash
    python scripts/estimate_cost.py --video-res 480p --video-seconds 5
    python scripts/estimate_cost.py --video-res 1080p --video-seconds 8
    ```
-2. **样片**（最省 480p）：把 `clips` 任务（带 `sample:true`、`shots`、`characters`、`duration`）`POST /api/plan` 备草稿，用户在「视频片段」分类点「开始生成」后边生成边看。
-3. **成片**：用户确认后在卡片里把分辨率调到 720p/1080p、关掉「样片」勾选后「重新生成」；或你 `POST /api/plan` 推一份成片任务，沿用同样的分镜图与角色参考。
 
-**默认值：** 样片 480p / 5s；成片 720p 起步，1080p 用于定稿镜头。竖屏短剧 `ratio=9:16`。
+**默认值：** 样片 480p / 5s；成片 720p 起步，1080p 用于定稿镜头。竖屏短剧 `ratio=9:16`（画幅由配置控制，不写进提示词）。
 
 ## 阶段 4：导出成片（把片段按剧情顺序拼成整片）
 
@@ -155,6 +157,7 @@ license: Complete terms in LICENSE.txt
 - **你（AI）按用户需求/剧情排定播放顺序**，`POST /api/plan` 备一条 `exports` 任务（草稿）：`order` 是 clip id 的有序列表（决定拼接先后），只放已生成的 clip。
 - 用户在「成片导出」分类点「**合成导出**」触发；后端 `concat_clips.py` 把各段归一化到统一画幅/帧率/音轨（兼容样片+成片混排）再无损拼接，完成后卡片里可预览/下载。
 - 想换顺序/增删片段：你改 `order` 再推一条（或用户让你重排），点「重新导出」即可。
+- **打包下载全部**：导出页顶部有「⬇ 打包下载全部」，把中间图像（人设/场景/分镜）+ 视频片段 + 成片整片打成一个 zip 下载。
 ```bash
 curl -s http://127.0.0.1:<端口>/api/plan -d '{"tasks":[{"category":"exports","id":"export_01","title":"完整成片","order":"clip_01,clip_02,clip_03"}]}'
 ```
@@ -167,7 +170,7 @@ curl -s http://127.0.0.1:<端口>/api/plan -d '{"tasks":[{"category":"exports","
   {"category":"characters","id":"char_01","name":"林夏","prompt":"…身份锚点+外观+体型…","gender":"女","build":"娇小，比男主矮一头"},
   {"category":"scenes","id":"scene_01","name":"便利店","prompt":"…只写环境，无人物…"},
   {"category":"shots","id":"shot_01","prompt":"中景，两人在玄关对话；男主比女主高约一头","characters":"char_01,char_02","scene":"scene_01"},
-  {"category":"clips","id":"clip_01","prompt":"…镜头动作+比例…","characters":"char_01,char_02","shots":"shot_01","resolution":"480p","duration":5,"sample":true},
+  {"category":"clips","id":"clip_01","prompt":"…镜头动作+比例…","characters":"char_01,char_02","shots":"shot_01","duration":5},
   {"category":"exports","id":"export_01","title":"完整成片","order":"clip_01,clip_02,clip_03"}
 ]}
 ```
