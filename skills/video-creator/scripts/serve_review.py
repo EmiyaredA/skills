@@ -255,12 +255,17 @@ class GenQueue:
                     t["status"] = "canceled"
 
     def _ensure_workers(self):
-        """按并发上限补足 worker（多个 worker 并行从队列取任务）。"""
+        """按并发上限补足 worker（多个 worker 并行从队列取任务）。
+
+        need = 还能再开的 worker 数 = min(并发上限 - 现有 worker, 已排队数)。
+        关键：用「并发上限 - 现有 worker」而非「min(并发, 已排队) - worker」，
+        否则任务陆续到达（先到的已转 running、不再计入 queued）时池子永远爬不到并发上限。
+        """
         self._stop = False
         with self.lock:
             self.workers = [w for w in self.workers if w.is_alive()]
             queued = sum(1 for t in self.tasks if t["status"] == "queued")
-            need = min(self.concurrency, queued) - len(self.workers)
+            need = min(self.concurrency - len(self.workers), queued)
         for _ in range(max(0, need)):
             w = threading.Thread(target=self._run, daemon=True)
             with self.lock:
