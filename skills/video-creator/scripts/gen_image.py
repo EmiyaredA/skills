@@ -11,9 +11,9 @@
   python gen_image.py --project P --type character --id char_01 \
       --prompt "..." --views front,side,back
 
-  # 场景图
+  # 场景 Environment Bible（六模块空镜合图）
   python gen_image.py --project P --type scene --id scene_01 \
-      --name 便利店 --prompt "深夜便利店内部，冷白光"
+      --name 便利店 --prompt "深夜便利店，收银区与货架通道，雨后冷白荧光"
 
   # 分镜机位图（可用角色/场景图作参考保持一致）
   python gen_image.py --project P --type shot --id shot_01 \
@@ -34,8 +34,28 @@ _MOCK_PNG = bytes.fromhex(
     "890000000d4944415478da6364f8cf00000201010073ad5d" "1c0000000049454e44ae426082"
 )
 
-# 场景图后缀：强制空镜，避免模型自作主张往场景里塞人物（场景=环境，人物留给分镜）
-SCENE_SUFFIX = "。【空镜场景：只表现环境、布景、道具与光线，画面中不要出现任何人物、角色或人影】"
+# 场景环境设定板（Environment Bible）默认模板
+ENVIRONMENT_BIBLE_BODY = (
+    "用途：用于后续分镜/视频的空间统一系统，需具备真实逻辑、连续镜头可行性与长期叙事一致性；"
+    "这是环境设定板（Environment Bible），不是普通单张效果图。"
+    "视觉规范：电影级视觉排版，分区清晰有条理，气质克制统一，禁止地产广告感、网红风、塑料感。"
+    "模块1世界观主视觉：完整展示主体空间及周边关联区域，体现真实使用痕迹与明确时间/天气氛围。"
+    "模块2空间结构：轴测或等距结构示意，展示完整布局、核心设施与家具位置、采光逻辑与人物动线（画面中无人物）。"
+    "模块3空间镜头参考：各区域统一风格的多角度空镜——全景 establishing、中景 medium、"
+    "主观视角站位 POV、动线方向 tracking、情绪氛围 mood；结构、道具、灯光、材质跨镜头完全一致。"
+    "模块4延展环境：与主空间呼应的外部或周边环境，使内外形成统一世界观。"
+    "模块5镜头动线：一条贯穿式移动路径按节点串联，具备电影调度感，支持长镜头跟拍与空间穿梭。"
+    "模块6视觉系统：统一空间建筑语言、材质体系、灯光逻辑、摄影风格、色彩、焦段景深、运镜节奏与时间天气氛围。"
+    "全图必须是同一原创场景体系，各分区空间逻辑一致。"
+    "严格空镜：不要出现任何人物、角色或人影；不要添加文字，不要水印。"
+)
+
+
+def environment_bible_suffix(has_reference):
+    """场景合图后缀：Environment Bible 六模块布局；具体画风由参考图 / prompt / config.style 决定。"""
+    intro = ("基于参考图，为同一原创场景制作完整的环境设定板（Environment Bible）。"
+             if has_reference else "为原创场景制作完整的环境设定板（Environment Bible）。")
+    return f"{intro}要求：{ENVIRONMENT_BIBLE_BODY}"
 
 # 人设三视图默认模板（官方设定资料卡式排版，仅结构与输出约束）
 CHARACTER_SHEET_BODY = (
@@ -128,6 +148,8 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
             refs = [pu.character_image(state, style_ref) or style_ref]
         if refs:
             style_note = "，与参考图保持同一画风（统一渲染风格、同一世界观）"
+    elif img_type == "scene" and refs:
+        style_note = "，与参考图保持同一空间格局与世界观气质"
     if img_type == "shot":
         anchor = pu.character_anchor(state, char_ids)
         if anchor:
@@ -187,7 +209,8 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
             ratio = ratio or "16:9"
             size = sa.pick_size(model, ratio)
         elif img_type == "scene":
-            gen_prompt = base_prompt + SCENE_SUFFIX
+            gen_prompt = (f"{prompt}{style_note}。"
+                          f"{environment_bible_suffix(bool(abs_refs))}")
         else:
             gen_prompt = base_prompt
         dest = os.path.join(outdir, f"{item_id}.png")

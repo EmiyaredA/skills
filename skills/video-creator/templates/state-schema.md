@@ -60,7 +60,7 @@ API Key **不**存在 config/state：环境变量 `SENSEAUDIO_API_KEY` 优先，
 
 ## scenes[]
 ```json
-{ "id": "scene_01", "name": "便利店", "prompt": "...",
+{ "id": "scene_01", "name": "便利店", "prompt": "场景锚点（无参考图时写主体/区域/氛围；有参考图时从简，见 environment-bible.md）",
   "image": "assets/scenes/scene_01.png",
   "review_decision": "通过", "status": "draft|approved" }
 ```

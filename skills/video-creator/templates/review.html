@@ -351,23 +351,53 @@ async function openPicker(btn){PICK_CARD=btn.closest('.card');
   if(!r.groups||!r.groups.length){b.innerHTML='<div style="color:var(--mut);padding:24px;text-align:center">工作目录里还没有图片。先生成人设/场景，或把图片放进 assets/refs/ 目录。</div>';return;}
   b.innerHTML=r.groups.map(g=>`<div class="pg"><div class="pgl">${g.label}</div><div class="pgrid">${g.files.map(f=>`<img src="/media?path=${encodeURIComponent(f)}" title="${f}" onclick="pickFile('${f.replace(/'/g,"\\'")}')">`).join('')}</div></div>`).join('');}
 function closePicker(){$('#picker').classList.remove('show');}
-function pickFile(path){if(!PICK_CARD){closePicker();return;}
+async function saveReferences(card){
+  if(!card)return null;
+  const id=card.dataset.id;
+  const f=cardFields(card);
+  const res=await api('/api/references',{category:CUR,id,references:f.references,references_add:f.references_add});
+  if(!res.ok){toast('参考图保存失败');return null;}
+  PENDING[id]=[];
+  const refs=(res.references||[]).slice();
+  if(S&&S.items[CUR]){const it=S.items[CUR].find(x=>x.id===id);if(it)it.references=refs;}
+  const k=tkey(CUR,id);
+  if(TASK[k])TASK[k].spec=Object.assign({},TASK[k].spec||{},{references:refs});
+  return res;
+}
+const REF_SAVE_TM={};
+function scheduleSaveRefs(card){
+  const id=card.dataset.id;
+  clearTimeout(REF_SAVE_TM[id]);
+  REF_SAVE_TM[id]=setTimeout(async ()=>{
+    const res=await saveReferences(card);
+    if(!res)return;
+    const ae=document.activeElement;
+    const editing=ae&&ae.closest&&ae.closest('.card')&&/TEXTAREA|INPUT/.test(ae.tagName||'');
+    if(!editing)renderCards();
+    else toast('参考图已保存');
+  },350);
+}
+async function pickFile(path){if(!PICK_CARD){closePicker();return;}
   const wrap=PICK_CARD.querySelector('.refs'),up=wrap.querySelector('.ref-up');
   if([...wrap.querySelectorAll('.ref')].some(d=>d.dataset.path===path)){closePicker();toast('已在参考图里');return;}
   const d=document.createElement('div');d.className='ref';d.dataset.path=path;d.dataset.removed='0';
   d.innerHTML=`<img src="/media?path=${encodeURIComponent(path)}" onclick="zoom('/media?path=${encodeURIComponent(path)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button>`;
-  wrap.insertBefore(d,up);closePicker();toast('已添加参考图：'+path);}
-function removeRef(btn){const d=btn.closest('.ref');if(!d)return;
+  wrap.insertBefore(d,up);closePicker();
+  const res=await saveReferences(PICK_CARD);
+  renderCards();toast(res?'已添加参考图：'+path:'添加失败');}
+async function removeRef(btn){const d=btn.closest('.ref');if(!d)return;
   if(d.dataset.added==='1'){const card=btn.closest('.card');const id=card&&card.dataset.id;const img=d.querySelector('img');
     const arr=PENDING[id]||[];const i=img?arr.indexOf(img.getAttribute('src')):-1;if(i>=0)arr.splice(i,1);}
-  d.remove();}
+  d.remove();
+  const card=btn.closest('.card');
+  if(card){await saveReferences(card);renderCards();}}
 const PENDING={};
 function addImageFile(card,f){if(!card||!f)return;const id=card.dataset.id;PENDING[id]=PENDING[id]||[];
   const rd=new FileReader();rd.onload=()=>{PENDING[id].push(rd.result);
     const wrap=card.querySelector('.refs'),up=wrap.querySelector('.ref-up');
     const d=document.createElement('div');d.className='ref';d.dataset.added='1';d.dataset.removed='0';
     d.innerHTML=`<img src="${rd.result}" onclick="zoom('${rd.result}','paste')"><button class="rx" onclick="removeRef(this)">✕</button>`;
-    wrap.insertBefore(d,up);};rd.readAsDataURL(f);}
+    wrap.insertBefore(d,up);scheduleSaveRefs(card);};rd.readAsDataURL(f);}
 function addRefs(input){const card=input.closest('.card');[...input.files].forEach(f=>addImageFile(card,f));input.value='';}
 // 记录“当前活动卡片”，支持 Ctrl+V 粘贴图片到该卡片
 let LAST_CARD=null;
@@ -376,7 +406,7 @@ document.addEventListener('focusin',e=>{const c=e.target.closest&&e.target.close
 document.addEventListener('paste',e=>{const items=(e.clipboardData||{}).items;if(!items)return;
   for(const it of items){if(it.type&&it.type.indexOf('image')===0){const f=it.getAsFile();
     const card=LAST_CARD||document.querySelector('.card');
-    if(card&&f){addImageFile(card,f);const nm=(card.querySelector('h3')||{}).textContent||'';toast('已粘贴参考图到「'+nm+'」，点「重新生成/生成」生效');e.preventDefault();}
+    if(card&&f){addImageFile(card,f);const nm=(card.querySelector('h3')||{}).textContent||'';toast('已粘贴到「'+nm+'」，正在保存…');e.preventDefault();}
     return;}}});
 function decide(btn,val){const seg=btn.parentElement;seg.querySelectorAll('button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
   const card=btn.closest('.card');card.classList.toggle('rev',val==='需修改');
@@ -410,7 +440,7 @@ async function poll(force){let r=null;
     const justFinished=r.tasks.some(t=>{const p=prev[tkey(t.category,t.item_id)];return p&&p.status!==t.status&&(t.status==='done'||t.status==='failed');});
     if(keysetChanged||justFinished){S=await api('/api/state');}
     const sig=r.tasks.filter(t=>t.category===CUR).map(t=>t.item_id+':'+t.status+':'+(t.progress||'')+':'+(t.message||'')).join('|')
-      +'#'+(S.items[CUR]||[]).map(it=>it.id).join(',');
+      +'#'+(S.items[CUR]||[]).map(it=>it.id+':'+(it.references||[]).join(',')).join(',');
     const changed=sig!==poll._last;poll._last=sig;
     // 用户正在某卡片输入时不强刷，避免吞掉编辑（下个周期再刷）；显式操作（force）则无视聚焦立即重渲染
     const ae=document.activeElement;

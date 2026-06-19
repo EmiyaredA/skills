@@ -18,6 +18,7 @@
   POST /api/config       深合并配置并落盘（实时生效）
   POST /api/key          保存 API Key 到 .sa_key
   POST /api/decision     保存某条目的「通过/需修改」+ 意见
+  POST /api/references   保存参考图列表（粘贴/上传/选图后立即落盘，切页不丢）
   POST /api/regenerate   按本条目编辑后的提示词/参考图/模型/设置重新生成（入队；失败卡片的「重试」也走这里）
   POST /api/plan         把一批新任务备为「待生成」草稿（助手续作下一阶段用）
   POST /api/generate     把「待生成」草稿转入队列开始生成（用户在 UI 点「开始生成」）
@@ -45,6 +46,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -768,6 +770,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/regenerate":
             self._enqueue_edit(body)
             return
+        if parsed.path == "/api/references":
+            self._save_references(body)
+            return
         if parsed.path == "/api/stop":
             cat, iid = body.get("category"), body.get("id")
             n = self.gq.stop(cat, iid) if cat and iid else self.gq.stop()
@@ -825,14 +830,52 @@ class Handler(BaseHTTPRequestHandler):
             if f in body and body[f] not in (None, ""):
                 it[f] = body[f]
 
+    def _merge_references(self, key, iid, body):
+        """合并已有路径与本次粘贴/上传的 data URI，落盘后返回完整 references 列表。"""
+        refs = list(body.get("references") or [])
+        seen = set(refs)
+        base_ts = int(time.time() * 1000)
+        for i, uri in enumerate(body.get("references_add") or []):
+            tag = f"{iid}_ref_{base_ts}_{i}"
+            rel = pu.save_data_uri(self.project, tag, uri)
+            if rel and rel not in seen:
+                refs.append(rel)
+                seen.add(rel)
+        return refs
+
+    def _persist_references(self, key, iid, refs):
+        """把 references 写入 state（若已有条目）与内存队列 spec。"""
+        state = self.rs.load()
+        it = pu.find(state.get(key, []), iid)
+        if it:
+            if key == "clips":
+                it.setdefault("inputs", {})["reference"] = list(refs)
+            else:
+                it["references"] = list(refs)
+                it.pop("reference", None)
+            self.rs.save(state)
+        k = f"{key}::{iid}"
+        with self.gq.lock:
+            spec = self.gq.specs.get(k)
+            if spec:
+                spec["references"] = list(refs)
+                if refs:
+                    spec.pop("style_ref", None)
+
+    def _save_references(self, body):
+        """粘贴/上传/选图后立即保存参考图，避免切页后只显示旧的一张。"""
+        key, iid = body.get("category"), body.get("id")
+        if not key or not iid:
+            self._send_json({"ok": False, "error": "缺少 category/id"}, 400)
+            return
+        refs = self._merge_references(key, iid, body)
+        self._persist_references(key, iid, refs)
+        self._send_json({"ok": True, "references": refs})
+
     def _enqueue_edit(self, body):
         """用户在卡片上改了之后点「重新生成」：合并原始 spec + 本次编辑字段，入队。"""
         key, iid = body.get("category"), body.get("id")
-        refs = list(body.get("references") or [])
-        for i, uri in enumerate(body.get("references_add") or []):
-            rel = pu.save_data_uri(self.project, f"{iid}_ref_{i}", uri)
-            if rel:
-                refs.append(rel)
+        refs = self._merge_references(key, iid, body)
         base = dict(self.gq.specs.get(f"{key}::{iid}", {}))
         base.update({"category": key, "id": iid, "references": refs})
         for f in EDITABLE:
