@@ -95,6 +95,11 @@ def main():
     ratio = args.ratio or cfg["ratio"]
     model = args.model or (img_cfg.get("model_sample") if args.sample else img_cfg.get("model_final"))
     use_async = args.async_hd or img_cfg.get("use_async", False)
+    style = (cfg.get("style") or "").strip()   # 项目级视觉风格（设置面板里改），追加到每条提示词保持全片统一
+
+    def with_style(p):
+        return f"{p}。【整体视觉风格：{style}，全片统一】" if style else p
+
     size = sa.pick_size(model, ratio)
     key, subdir = TYPE_MAP[args.type]
     outdir = os.path.join(args.project, subdir)
@@ -160,7 +165,7 @@ def main():
         for v in views:
             prompt = f"{args.prompt}{gender}{style_note}。{VIEW_SUFFIX.get(v, '')}"
             dest = os.path.join(outdir, f"{args.id}_{v}.png")
-            gen_one(model, prompt, size, reference, seed, dest, args.mock, use_async)
+            gen_one(model, with_style(prompt), size, reference, seed, dest, args.mock, use_async)
             three[v] = os.path.relpath(dest, args.project)
             cost += sa.estimate_image(model)
             print(f"  ✓ {v}: {dest}")
@@ -177,7 +182,7 @@ def main():
         else:
             prompt = base_prompt
         dest = os.path.join(outdir, f"{args.id}.png")
-        gen_one(model, prompt, size, reference, seed, dest, args.mock, use_async)
+        gen_one(model, with_style(prompt), size, reference, seed, dest, args.mock, use_async)
         rel = os.path.relpath(dest, args.project)
         record["image"] = rel
         if args.type == "character":

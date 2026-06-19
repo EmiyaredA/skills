@@ -91,6 +91,9 @@ def main():
             img = pu.character_image(state, cid)
             if img and img not in refs:
                 refs.append(img)
+    style = (cfg.get("style") or "").strip()   # 项目级视觉风格：追加到提示词，与图像阶段保持一致
+    if style:
+        prompt = f"{prompt}。【整体视觉风格：{style}，全片统一】"
 
     mode = derive_mode(refs, args.prev_video, args.next_video, args.audio)
     cost = sa.estimate_video(resolution, duration)

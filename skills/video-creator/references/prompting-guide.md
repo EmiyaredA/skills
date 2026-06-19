@@ -60,7 +60,7 @@ python gen_video.py --project P --id clip_03 --characters char_01,char_02 \
 - 多角色镜头：视频用 `--characters` 注入全部角色锚点+参考图；prompt 写清人数与各自动作。
 - 场景：复用场景图作参考，保持色调与光源描述一致。
 - 跨镜：视频以分镜图作参考（`--shots`），构图/内容随分镜走（见 [generation-modes.md](generation-modes.md)）。
-- 画幅与风格：整部短剧统一 `ratio` 与风格词（写在 `state.config.style`）。
+- 画幅与风格：整部短剧统一 `ratio` 与风格词。**`state.config.style`（设置面板「视觉风格」）会自动追加到每条图像/视频提示词**（如「整体视觉风格：日系治愈手绘风，全片统一」），无需在每条 prompt 里手写；想统一改风格只改这一处。
 
 ## 反面清单（容易翻车）
 - 一个镜头塞多个主要动作 → 拆成多个 clip。

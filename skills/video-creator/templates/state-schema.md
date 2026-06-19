@@ -16,7 +16,8 @@
 | `history[]` | 操作日志 |
 
 ## config
-默认值见 `project_utils.default_config()`；用户在实时审核页（`serve_review.py`）的「设置」面板里随时改、即时落盘（`/api/config` → `apply_config`）：
+默认值见 `project_utils.default_config()`；用户在实时审核页（`serve_review.py`）的「设置」面板里随时改、即时落盘（`/api/config` → `apply_config`）。
+其中 `style`（视觉风格）会被 `gen_image`/`gen_video` 自动追加到每条提示词，保持全片风格统一：
 ```json
 { "ratio": "9:16", "style": "写实电影感",
   "image": { "model_final": "senseaudio-image-2.0-260319",
