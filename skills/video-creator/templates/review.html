@@ -320,7 +320,15 @@ function taskItem(t){const s=t.spec||{};   // 把"还没落进 state 的在途�
     model:s.model||'',ratio:s.ratio||'',resolution:s.resolution||'480p',duration:s.duration||5,
     references:s.references||[],order:order,
     media:[],decision:'通过',note:''};}
-function renderCards(){const items=(S.items[CUR]||[]).slice();
+const TASK_OVERLAY_FIELDS=['prompt','model','ratio','resolution','duration','references'];
+function mergeTaskSpec(it){   // 已在 state 里的卡片：在途任务 spec 优先于尚未落盘的 state（防切页回退旧参考图）
+  const t=TASK[tkey(CUR,it.id)];
+  if(!t||!t.spec||!['draft','queued','running','failed','canceled'].includes(t.status))return it;
+  const s=t.spec,m=Object.assign({},it);
+  TASK_OVERLAY_FIELDS.forEach(f=>{if(s[f]!=null&&s[f]!=='')m[f]=s[f];});
+  if(Array.isArray(s.references))m.references=s.references.slice();
+  return m;}
+function renderCards(){const items=(S.items[CUR]||[]).slice().map(mergeTaskSpec);
   const ids=new Set(items.map(it=>it.id));
   // 首次生成的资产在完成前不在 state 里——把它们的任务也渲染成占位卡片，实时显示状态
   Object.values(TASK).forEach(t=>{ if(t.category===CUR && !ids.has(t.item_id)){ items.push(taskItem(t)); ids.add(t.item_id); }});
@@ -381,10 +389,14 @@ async function regen(btn){const card=btn.closest('.card');const id=card.dataset.
   const res=await api('/api/regenerate',Object.assign({category:CUR,id},f));
   if(!res.ok){toast('入队失败');return;}
   PENDING[id]=[];toast('已加入生成队列：'+id);
-  const k=tkey(CUR,id),old=TASK[k]||{};                  // 乐观更新：立刻把卡片标成「排队中」，不等下一次轮询
-  const sp=Object.assign({},old.spec||{},f);
+  const k=tkey(CUR,id),old=TASK[k]||{};
+  const sp=res.spec||Object.assign({},old.spec||{},f);
   TASK[k]=Object.assign({},old,res.task||{status:'queued'},{category:CUR,item_id:id,spec:sp});
-  renderCards();poll(true);}                               // 强制重渲染（即使有输入框聚焦），再轮询看实时进度
+  if(S&&S.items[CUR]&&sp.references){
+    const it=S.items[CUR].find(x=>x.id===id);
+    if(it)it.references=sp.references.slice();
+  }
+  renderCards();poll(true);}
 
 async function poll(force){let r=null;
   if(POLL_T){clearTimeout(POLL_T);POLL_T=null;}   // 保证全程只有一条轮询链，避免每次手动 poll() 叠加成轮询风暴

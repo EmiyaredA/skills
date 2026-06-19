@@ -37,12 +37,30 @@ _MOCK_PNG = bytes.fromhex(
 # 场景图后缀：强制空镜，避免模型自作主张往场景里塞人物（场景=环境，人物留给分镜）
 SCENE_SUFFIX = "。【空镜场景：只表现环境、布景、道具与光线，画面中不要出现任何人物、角色或人影】"
 
+# 人设三视图默认模板（结构要求）；默认 Q 版画风见 CHARACTER_SHEET_STYLE_DEFAULT
+CHARACTER_SHEET_BODY = (
+    "第一排横向展示完整三视图：正面、侧面、背面，全身站姿，比例一致。"
+    "三张视图必须是同一个角色，保持相同的脸型、发型、发色、眼睛颜色、体型、"
+    "服装结构、服装颜色、鞋子和配饰。"
+    "使用干净白色背景或浅灰背景，平面均匀光照，轻微阴影，禁止复杂背景。"
+    "不要添加文字，不要水印，不要多余人物，不要改变服装设计。"
+)
+CHARACTER_SHEET_STYLE_DEFAULT = "角色为二次元Q版风格，精致手办质感，软萌比例，线条干净。"
+
 VIEW_SUFFIX = {
-    "front": "正面全身，角色面向镜头，T-pose，纯色背景，设定集风格",
-    "side": "正侧面全身，同一角色，同样服装，纯色背景，设定集风格",
-    "back": "背面全身，同一角色，同样服装，纯色背景，设定集风格",
-    "sheet": "角色三视图设定集：同一画面内并排展示正面、正侧面、背面全身，纯色背景，统一光照",
+    "front": "正面全身站姿，角色面向镜头，同一原创角色，白/浅灰背景，平面均匀光照，无文字无水印",
+    "side": "正侧面全身站姿，同一角色同样服装与配饰，白/浅灰背景，平面均匀光照，无文字无水印",
+    "back": "背面全身站姿，同一角色同样服装与配饰，白/浅灰背景，平面均匀光照，无文字无水印",
 }
+
+
+def character_sheet_suffix(has_reference, project_style=""):
+    """人设合图后缀：有参考图时强调「同一原创角色」；未设 config.style 时追加默认 Q 版画风。"""
+    intro = ("根据参考图生成同一原创角色的角色设定三视图。"
+             if has_reference else "生成原创角色的角色设定三视图。")
+    style = (project_style or "").strip()
+    tail = CHARACTER_SHEET_STYLE_DEFAULT if not style else ""
+    return f"{intro}要求：{CHARACTER_SHEET_BODY}{tail}"
 
 
 def _emit(msg, on_log=None):
@@ -152,7 +170,10 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
         three = {}
         gender_s = f"，{gender}" if gender else ""
         for v in view_list:
-            vprompt = f"{prompt}{gender_s}{style_note}。{VIEW_SUFFIX.get(v, '')}"
+            vsuf = VIEW_SUFFIX.get(v, "")
+            if not style:
+                vsuf += CHARACTER_SHEET_STYLE_DEFAULT
+            vprompt = f"{prompt}{gender_s}{style_note}。{vsuf}"
             dest = os.path.join(outdir, f"{item_id}_{v}.png")
             gen_one(model, pu.apply_style(vprompt, style), size, reference_img, seed, dest, mock, use_async)
             three[v] = os.path.relpath(dest, project)
@@ -163,7 +184,8 @@ def run_image_generation(project, *, img_type, item_id, prompt, name="", referen
     else:
         if img_type == "character":
             gender_s = f"，{gender}" if gender else ""
-            gen_prompt = f"{prompt}{gender_s}{style_note}。{VIEW_SUFFIX['sheet']}"
+            gen_prompt = (f"{prompt}{gender_s}{style_note}。"
+                          f"{character_sheet_suffix(bool(abs_refs), style)}")
             ratio = ratio or "16:9"
             size = sa.pick_size(model, ratio)
         elif img_type == "scene":

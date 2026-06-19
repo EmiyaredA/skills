@@ -811,6 +811,20 @@ class Handler(BaseHTTPRequestHandler):
         it["review_decision"], it["review_note"] = decision, note
         it["status"] = "approved" if decision == "通过" else "draft"
 
+    def _persist_item_edit(self, state, key, iid, body, refs):
+        """把用户本次编辑写入 state，避免切页后 UI 仍显示旧参考图/提示词。"""
+        it = pu.find(state.get(key, []), iid)
+        if not it:
+            return
+        if key == "clips":
+            it.setdefault("inputs", {})["reference"] = refs
+        else:
+            it["references"] = refs
+            it.pop("reference", None)
+        for f in EDITABLE:
+            if f in body and body[f] not in (None, ""):
+                it[f] = body[f]
+
     def _enqueue_edit(self, body):
         """用户在卡片上改了之后点「重新生成」：合并原始 spec + 本次编辑字段，入队。"""
         key, iid = body.get("category"), body.get("id")
@@ -826,8 +840,13 @@ class Handler(BaseHTTPRequestHandler):
                 base[f] = body[f]
         if "sample" in body:
             base["sample"] = bool(body["sample"])
+        if refs:
+            base.pop("style_ref", None)   # 用户已显式指定参考图，不再回退到画风基准角色图
+        state = self.rs.load()
+        self._persist_item_edit(state, key, iid, body, refs)
+        self.rs.save(state)
         t = self.gq.enqueue(base)
-        self._send_json({"ok": True, "task": t})
+        self._send_json({"ok": True, "task": t, "spec": base})
 
 
 
