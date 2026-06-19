@@ -9,13 +9,9 @@
 打印写入的相对路径（相对项目目录），可直接作为 --reference 传入。
 """
 import argparse
-import base64
-import os
 import sys
 
 import project_utils as pu
-
-EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 
 
 def main():
@@ -26,17 +22,9 @@ def main():
     args = ap.parse_args()
 
     uri = sys.stdin.read().strip() if args.datauri == "-" else args.datauri.strip()
-    if not uri.startswith("data:"):
+    rel = pu.save_data_uri(args.project, args.name, uri)
+    if not rel:
         raise SystemExit("不是 data URI（应以 data: 开头）")
-    header, _, b64 = uri.partition(",")
-    mime = header[5:].split(";")[0]
-    ext = EXT.get(mime, ".png")
-    outdir = os.path.join(args.project, "assets", "refs")
-    os.makedirs(outdir, exist_ok=True)
-    dest = os.path.join(outdir, args.name + ext)
-    with open(dest, "wb") as f:
-        f.write(base64.b64decode(b64))
-    rel = os.path.relpath(dest, args.project)
     print(rel)
 
 

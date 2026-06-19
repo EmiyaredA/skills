@@ -2,5 +2,4 @@
 # 可选依赖：
 #   Pillow  —— 多角色/场景分镜把多张参考图拼成一张「参考拼贴」喂给单参考图的图像 API（gen_image）。
 #             缺失时自动回退为只用第一张参考图。安装：pip install Pillow
-#   ffmpeg  —— 仅「承接/续接已有视频」抽帧用（extract_frames.py）。macOS: brew install ffmpeg
 Pillow>=9

@@ -1,9 +1,13 @@
 """项目状态读写工具。state.json 是各轮对话之间的唯一事实来源。"""
+import base64
 import contextlib
 import json
 import os
 import uuid
 from datetime import datetime, timezone
+
+# 上传/落盘参考图时按 MIME 选扩展名（serve_review 上传、save_ref CLI 共用）
+EXT_BY_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 
 try:
     import fcntl  # POSIX 文件锁，用于并发安全写 state.json
@@ -21,7 +25,7 @@ SUBDIRS = [
     ("voices",     "assets/voices",     "语音参考", "🎙️"),  # 配音 / 声音素材
     ("refs",       "assets/refs",       "参考素材", "🖼️"),  # 用户上传 / 抽帧的参考图
     ("output",     "output",            "成片输出", "🎞️"),  # 生成的视频
-    ("review",     "review",            "审核页", "📝"),    # 实时应用产物（serve_url.txt / plan.json / review_result.json）
+    ("review",     "review",            "审核页", "📝"),    # 实时应用产物（serve_url.txt / plan.json / serve.pid / serve.log）
     ("docs",       "docs",              "文稿", "📄"),      # 剧本 / 说明
 ]
 
@@ -38,6 +42,24 @@ def ensure_dirs(project):
         os.makedirs(os.path.join(project, rel), exist_ok=True)
 
 
+def save_data_uri(project, name, uri, key="refs"):
+    """把 base64 data URI 落盘到指定子目录（默认 assets/refs/），返回相对项目目录的路径。
+
+    非 data URI 返回 None。serve_review 的上传接口与 save_ref.py CLI 共用本函数。
+    """
+    if not uri or not uri.startswith("data:"):
+        return None
+    header, _, b64 = uri.partition(",")
+    mime = header[5:].split(";")[0]
+    ext = EXT_BY_MIME.get(mime, ".png")
+    outdir = subdir(project, key)
+    os.makedirs(outdir, exist_ok=True)
+    dest = os.path.join(outdir, name + ext)
+    with open(dest, "wb") as f:
+        f.write(base64.b64decode(b64))
+    return os.path.relpath(dest, project)
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -48,7 +70,9 @@ def default_config():
         "ratio": "16:9",
         "style": "",
         "image": {
-            "model_final": "senseaudio-image-2.0-260319",   # 默认用效果最佳/最贵的
+            # 样片与成片默认同用 2.0（参考图质量直接影响人设/场景/分镜一致性，不降图像模型）。
+            # 省积分主要靠视频侧的 480p 样片 → 1080p 成片；想更省可在设置里把样片模型改便宜些。
+            "model_final": "senseaudio-image-2.0-260319",
             "model_sample": "senseaudio-image-2.0-260319",
             "use_async": False,
         },
@@ -94,7 +118,6 @@ def default_state(title=""):
         "project_id": str(uuid.uuid4()),
         "title": title,
         "created_at": now_iso(),
-        "phase": "align",  # align | mode | generate
         "config": default_config(),
         "story": {"logline": "", "summary": "", "beats": []},
         "characters": [],   # 见 templates/state-schema.md
@@ -242,12 +265,3 @@ def character_image(state, cid):
 def scene_image(state, sid):
     s = find(state.get("scenes", []), sid)
     return s.get("image") if s else None
-
-
-def upsert(items, item_id, **fields):
-    it = find(items, item_id)
-    if it is None:
-        it = {"id": item_id}
-        items.append(it)
-    it.update(fields)
-    return it

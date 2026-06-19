@@ -24,16 +24,16 @@
   POST /api/shutdown     关停本地服务
 
   python serve_review.py --project ./drama [--plan plan.json] [--port 8765] [--daemon] [--stop]
+  （常驻启动加 --daemon：脚本自行双 fork 脱离会话，启动命令瞬间返回、服务独立存活，见 SKILL.md 启动协议）
 
 plan.json 形如：{"tasks":[
   {"category":"characters","id":"char_01","name":"林夏","prompt":"...","gender":"女","views":"front,side,back","sample":true},
   {"category":"scenes","id":"scene_01","name":"便利店","prompt":"..."},
   {"category":"shots","id":"shot_01","prompt":"...","characters":"char_01","scene":"scene_01"},
-  {"category":"clips","id":"clip_01","prompt":"...","first_frame":"assets/shots/shot_01.png","resolution":"480p","duration":5,"sample":true}
+  {"category":"clips","id":"clip_01","prompt":"...","shots":"shot_01","characters":"char_01","resolution":"480p","duration":5,"sample":true}
 ]}
 """
 import argparse
-import base64
 import json
 import mimetypes
 import os
@@ -60,7 +60,6 @@ CATEGORIES = [
     {"key": "clips", "label": "视频片段", "icon": "movie", "kind": "video"},
     {"key": "voices", "label": "语音配音", "icon": "microphone", "kind": "voice"},
 ]
-EXT_BY_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 # 生成阶段：阶段1(人设+场景) → 阶段2(分镜，用人设/场景图作参考) → 阶段3(视频/语音)。
 # 队列按阶段门控：上一阶段全部结束前，不启动下一阶段——保证分镜/视频生成时参考图已存在。
 STAGE_OF = {"characters": 1, "scenes": 1, "shots": 2, "clips": 3, "voices": 3}
@@ -91,18 +90,8 @@ def _ref_list(*vals):
 
 
 def save_datauri(project, name, uri):
-    """把上传的 data URI 落盘到 assets/refs/，返回相对路径。"""
-    if not uri.startswith("data:"):
-        return None
-    header, _, b64 = uri.partition(",")
-    mime = header[5:].split(";")[0]
-    ext = EXT_BY_MIME.get(mime, ".png")
-    outdir = pu.subdir(project, "refs")
-    os.makedirs(outdir, exist_ok=True)
-    dest = os.path.join(outdir, name + ext)
-    with open(dest, "wb") as f:
-        f.write(base64.b64decode(b64))
-    return os.path.relpath(dest, project)
+    """把上传的 data URI 落盘到 assets/refs/，返回相对路径（薄封装 pu.save_data_uri）。"""
+    return pu.save_data_uri(project, name, uri)
 
 
 def est_cost(key, spec):
@@ -111,7 +100,7 @@ def est_cost(key, spec):
             return round(sa.estimate_video(spec.get("resolution") or "480p", int(spec.get("duration") or 5)), 2)
         if key in ("characters", "scenes", "shots"):
             n = len((spec.get("views") or "").split(",")) if spec.get("views") else 1
-            return round(sa.estimate_image(spec.get("model") or sa.DEFAULT_VIDEO_MODEL) * n, 2)
+            return round(sa.estimate_image(spec.get("model") or sa.DEFAULT_IMAGE_MODEL) * n, 2)
     except Exception:
         pass
     return 0.0
@@ -177,13 +166,8 @@ def build_gen_cmd(project, key, spec):
             cmd += ["--next-video", spec["next_video"]]
         if spec.get("audio"):
             cmd += ["--audio", spec["audio"]]
-        # 兼容历史：把 first_frame/last_frame 当作普通参考图
-        rlist = list(refs)
-        for k in ("first_frame", "last_frame"):
-            if spec.get(k) and spec[k] not in rlist:
-                rlist.append(spec[k])
-        if rlist:
-            cmd += ["--reference", ",".join(rlist)]
+        if refs:
+            cmd += ["--reference", ",".join(refs)]
         return cmd
     if key == "voices":
         cmd = [py, os.path.join(HERE, "gen_voice.py"), "--project", project,
@@ -454,7 +438,7 @@ class ReviewState:
                 "prompt": cl.get("prompt", ""), "model": cl.get("model", ""),
                 "resolution": cl.get("resolution", "480p"), "duration": cl.get("duration", 5),
                 "ratio": cl.get("ratio", ""),
-                "references": _ref_list(inp.get("reference", []), inp.get("first_frame"), inp.get("last_frame")),
+                "references": _ref_list(inp.get("reference", [])),
                 "media": media, "decision": cl.get("review_decision", "通过"),
                 "note": cl.get("review_note", ""), "status": cl.get("status", "draft")}
 
@@ -495,7 +479,7 @@ class ReviewState:
         img_models = [{"id": m, "price": p} for m, p in sa.IMAGE_PRICE.items()]
         vid_models = [m for m in dict.fromkeys([cfg.get("video", {}).get("model"), sa.DEFAULT_VIDEO_MODEL]) if m]
         return {
-            "title": state.get("title") or "短剧项目", "phase": state.get("phase", ""),
+            "title": state.get("title") or "短剧项目",
             "project": self.project, "config": cfg, "categories": cats, "items": items,
             "stages": STAGES,
             "options": {"image_models": img_models, "video_models": vid_models,
@@ -1129,6 +1113,7 @@ def daemonize(logpath):
     """双重 fork + setsid：脱离父会话/进程组，使服务在启动命令返回或被回收后仍存活（Unix）。
 
     必须在创建任何线程/绑定端口之前调用——fork 只保留当前线程。
+    重定向 stdin/stdout/stderr，让启动命令的管道立即收到 EOF 而不挂起。
     """
     if os.fork() > 0:
         os._exit(0)            # 原始进程立即退出 → 启动命令瞬间返回
@@ -1151,7 +1136,7 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--concurrency", type=int, default=4, help="并行生成的任务数（默认 4）")
     ap.add_argument("--daemon", action="store_true",
-                    help="脱离会话后台常驻（推荐）：不随启动命令返回/回合结束被回收")
+                    help="脱离会话后台常驻（推荐）：自行双 fork，不随启动命令返回/回合结束被回收")
     ap.add_argument("--stop", action="store_true",
                     help="停止该项目正在运行的服务（读 review/serve.pid 结束进程）")
     ap.add_argument("--no-open", action="store_true")

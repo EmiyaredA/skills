@@ -34,7 +34,7 @@ TTS_PRICE_PER_10K_CHARS = 3.5
 IMAGE_SIZES = {
     "senseaudio-image-2.0-260319": {
         "1:1": "1024x1024", "16:9": "1536x864", "9:16": "864x1536",
-        "4:3": "2048x1536" if False else "1024x1024", "3:4": "864x1536",
+        "4:3": "1024x1024", "3:4": "864x1536",
     },
     "senseaudio-image-1.0-260319": {
         "1:1": "1328x1328", "16:9": "1664x928", "9:16": "928x1664",
@@ -49,6 +49,7 @@ IMAGE_SIZES = {
 }
 
 DEFAULT_VIDEO_MODEL = "doubao-seedance-2-0-260128"
+DEFAULT_IMAGE_MODEL = "senseaudio-image-2.0-260319"
 DEFAULT_TTS_MODEL = "senseaudio-tts-1.5-260319"
 
 
@@ -215,26 +216,21 @@ def image_async(model, prompt, size=None, reference=None, seed=None, poll_interv
 
 # ---------- 视频 ----------
 
-def build_video_content(prompt, first_frame=None, last_frame=None, reference_images=None,
+def build_video_content(prompt, reference_images=None,
                         prev_video=None, next_video=None, audio=None):
-    """组装 /v1/video/create 的 content 数组。
+    """组装 /v1/video/create 的 content 数组（参考图驱动，不用首/尾帧）。
 
-    - first_frame/last_frame：图片，作为首/尾帧约束。
-    - reference_images：列表，作为风格/主体参考。
+    - reference_images：列表，分镜图 + 角色设定图等，作为主体/构图参考。
     - prev_video/next_video：已托管的视频 URL（仅 http(s)，data URL 体积过大不建议）。
     - audio：音频 URL，驱动口型/节奏。
     """
     content = [{"type": "text", "text": prompt}]
-    if first_frame:
-        content.append({"type": "image", "url": as_url(first_frame), "role": "first_frame"})
-    if last_frame:
-        content.append({"type": "image", "url": as_url(last_frame), "role": "last_frame"})
     for ref in (reference_images or []):
         content.append({"type": "image", "url": as_url(ref), "role": "reference"})
     for v in (prev_video, next_video):
         if v:
             if not v.startswith(("http://", "https://")):
-                raise APIError(f"参考视频必须是已托管的 http(s) URL：{v}（本地视频请改用 extract_frames.py 抽取首/尾帧）")
+                raise APIError(f"参考视频必须是已托管的 http(s) URL：{v}（本地视频请先自行上传托管再传 URL）")
             content.append({"type": "video", "video_url": v})
     if audio:
         content.append({"type": "audio", "audio_url": as_url(audio)})

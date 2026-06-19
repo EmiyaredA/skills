@@ -10,7 +10,6 @@
   （--mock 仅 selftest 自检用，勿作交付）
 """
 import argparse
-import json
 import os
 
 import sa_client as sa

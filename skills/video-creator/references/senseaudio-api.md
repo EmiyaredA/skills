@@ -30,8 +30,8 @@
 ### 图像模型与价格（折扣价，元/张）
 | 模型 | 价 | 说明 |
 |------|----|------|
-| `senseaudio-image-2.0-260319` | 0.5 | 高分辨率、效果最佳；**成片首选** |
-| `senseaudio-image-1.0-260319` | 0.2 | 最便宜；**样片/草稿首选** |
+| `senseaudio-image-2.0-260319` | 0.5 | 高分辨率、效果最佳；**样片与成片默认都用它**（参考图质量影响一致性） |
+| `senseaudio-image-1.0-260319` | 0.2 | 最便宜；想降图像成本时可在设置里设为样片模型 |
 | `doubao-seedream-5-0-260128` | 0.22 | 大尺寸输出 |
 | `sensenova-u1-fast` | 0.5 | 信息图/排版 |
 
@@ -73,7 +73,7 @@
 - `duration`：4–15 秒
 - `resolution`：`480p | 720p | 1080p`
 - `ratio`：`16:9 | 9:16 | 4:3 | 3:4 | 1:1`
-- `video_url` 必须是 http(s) 已托管地址（Data URL 体积过大，本地视频请改用 `extract_frames.py` 抽帧）。
+- `video_url` 必须是 http(s) 已托管地址（Data URL 体积过大，本地视频请先自行上传托管再传 URL）。
 - 响应：`{ "task_id": "..." }`
 
 ### 查询 `GET /v1/video/status?id=<task_id>`

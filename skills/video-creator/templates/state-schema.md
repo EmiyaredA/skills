@@ -7,9 +7,8 @@
 |------|------|
 | `project_id` | uuid |
 | `title` | 作品标题 |
-| `phase` | `align`（对齐需求）/ `mode`（确定模式）/ `generate`（生成） |
 | `config` | 全局配置（见下） |
-| `story` | 剧情：`logline`、`summary`、`beats[]` |
+| `story` | 剧情：`logline`、`summary`、`beats[]`（阶段1 对齐时由助手填写，可选） |
 | `characters[]` | 角色 |
 | `scenes[]` | 场景 |
 | `shots[]` | 分镜机位 |
@@ -21,7 +20,7 @@
 ```json
 { "ratio": "9:16", "style": "写实电影感",
   "image": { "model_final": "senseaudio-image-2.0-260319",
-             "model_sample": "senseaudio-image-1.0-260319", "use_async": false },
+             "model_sample": "senseaudio-image-2.0-260319", "use_async": false },
   "video": { "model": "doubao-seedance-2-0-260128",
              "resolution_sample": "480p", "resolution_final": "1080p",
              "duration_default": 5, "generate_audio": true, "watermark": true },

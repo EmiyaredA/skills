@@ -19,7 +19,7 @@
   python gen_image.py --project P --type shot --id shot_01 \
       --prompt "中景，林夏推开玻璃门" --reference assets/characters/char_01_front.png
 
-  --sample 用最便宜的模型出草稿。（--mock 仅 selftest 自检用，勿作交付）
+  --sample 用配置的「样片模型」出草稿（默认与成片同为 2.0，可在应用设置里改便宜模型）。（--mock 仅 selftest 自检用，勿作交付）
 """
 import argparse
 import os
@@ -72,14 +72,13 @@ def main():
     ap.add_argument("--reference", default=None, help="参考图（本地路径或URL），保持一致性")
     ap.add_argument("--style-ref", default=None, help="画风基准：另一角色 id 或图片路径；新角色参考它出同一画风（如男孩参考女孩出同款二次元3D）")
     ap.add_argument("--gender", default=None, help="角色性别（character 用），写进身份锚点防止性别漂移")
-    ap.add_argument("--scene-id", default=None, help="shot 所属场景")
-    ap.add_argument("--scene", default=None, help="shot 所属场景（同 --scene-id）")
+    ap.add_argument("--scene", default=None, help="shot 所属场景 id；自动把场景图作参考")
     ap.add_argument("--characters", default=None, help="shot 出场角色 id，逗号分隔；自动注入角色锚点+参考图")
     ap.add_argument("--views", default=None, help="角色分张出图，逗号分隔：front,side,back")
     ap.add_argument("--ratio", default=None, help="覆盖项目默认画幅")
     ap.add_argument("--model", default=None)
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--sample", action="store_true", help="用最便宜模型出草稿")
+    ap.add_argument("--sample", action="store_true", help="用配置的样片模型出草稿（默认与成片同款，可在设置里改便宜模型）")
     ap.add_argument("--async-hd", action="store_true", help="高分辨率用异步接口")
     ap.add_argument("--mock", action="store_true")
     args = ap.parse_args()
@@ -104,7 +103,7 @@ def main():
 
     # 分镜：自动注入出场角色的身份锚点（防性别/服装漂移）+ 自动选参考图
     char_ids = [c.strip() for c in args.characters.split(",")] if args.characters else []
-    scene_id = args.scene or args.scene_id
+    scene_id = args.scene
     base_prompt = args.prompt
     # --reference 现在可传多张（逗号分隔）：分镜会把"各角色设定图 + 场景图"一并参考
     refs = [r.strip() for r in args.reference.split(",")] if args.reference else []
