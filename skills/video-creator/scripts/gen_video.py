@@ -105,22 +105,22 @@ def main():
     if refs:
         print(f"  ↳ 参考图 {len(refs)} 张（分镜图+角色设定图）；出场角色：{','.join(char_ids) or '(无)'}（注入身份锚点，防漂移/消失）")
 
-    record = {
-        "id": args.id, "kind": kind, "mode": mode, "prompt": args.prompt,
+    # 样片(sample)与成片(final)各自独立存进 clip 的子对象，互不覆盖
+    shared = {
+        "id": args.id, "mode": mode, "prompt": args.prompt,
         "model": args.model or vcfg.get("model", sa.DEFAULT_VIDEO_MODEL),
-        "resolution": resolution, "duration": duration, "ratio": ratio,
-        "shot_ids": shot_ids,
-        "characters": char_ids,
+        "ratio": ratio, "shot_ids": shot_ids, "characters": char_ids,
         "inputs": {"reference": refs, "prev_video": args.prev_video,
                    "next_video": args.next_video, "audio": args.audio},
-        "cost_estimate": round(cost, 2), "status": "generating",
     }
+    part = {"resolution": resolution, "duration": duration, "mode": mode,
+            "cost_estimate": round(cost, 2), "status": "generating"}
 
     if args.mock:
         with open(dest, "wb") as f:
             f.write(b"MOCK_MP4_PLACEHOLDER")
-        record.update(status="done", local_path=os.path.relpath(dest, args.project),
-                      task_id="mock", video_url="")
+        part.update(status="done", local_path=os.path.relpath(dest, args.project),
+                    task_id="mock", video_url="")
         print(f"  ✓ (mock) {dest}")
     else:
         # 把项目内相对路径解析成绝对路径再传给 API（否则按子进程 CWD 找不到文件）
@@ -135,7 +135,7 @@ def main():
             content, duration, resolution, ratio,
             model=args.model or vcfg.get("model", sa.DEFAULT_VIDEO_MODEL),
             generate_audio=generate_audio, watermark=watermark)
-        record["task_id"] = task_id
+        part["task_id"] = task_id
         print(f"  任务已提交 task_id={task_id}，轮询中…")
 
         def show(status, progress):
@@ -144,17 +144,18 @@ def main():
 
         st = sa.video_poll(task_id, on_progress=show)
         sa.download(st["video_url"], dest)
-        record.update(status="done", video_url=st["video_url"],
-                      local_path=os.path.relpath(dest, args.project))
+        part.update(status="done", video_url=st["video_url"],
+                    local_path=os.path.relpath(dest, args.project))
         print(f"  ✓ {dest}")
 
     def _apply(st):
         items = st.setdefault("clips", [])
         ex = pu.find(items, args.id)
-        if ex:
-            ex.update(record)
-        else:
-            items.append(record)
+        if not ex:
+            ex = {"id": args.id}
+            items.append(ex)
+        ex.update(shared)
+        ex[kind] = {**(ex.get(kind) or {}), **part}   # 只更新本档(sample/final)，保留另一档
         pu.log(st, f"生成视频 {args.id}（{kind}/{mode}/{resolution}/{duration}s）")
     pu.update_state(args.project, _apply)   # 并发安全：重载最新 state 再写
     print(f"已更新 state.json（clip={args.id}）")

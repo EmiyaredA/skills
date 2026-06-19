@@ -244,6 +244,32 @@ class GenQueue:
             self._ensure_workers()
         return n
 
+    def generate_clips(self, sample):
+        """一键生成所有 clip 的样片(sample=True)或成片(sample=False)：沿用各 clip 的 spec、覆盖 sample 标记后入队。
+
+        内存里有 spec 就用内存的；服务重启后内存为空，则从 state.clips 兜底重建 spec。
+        """
+        by_id = {}
+        with self.lock:
+            for s in self.specs.values():
+                if s.get("category") == "clips":
+                    by_id[s["id"]] = dict(s)
+        try:
+            st = pu.load_state(self.project)
+        except Exception:
+            st = {}
+        for cl in st.get("clips", []):
+            if cl["id"] not in by_id:
+                inp = cl.get("inputs", {})
+                by_id[cl["id"]] = {"category": "clips", "id": cl["id"], "prompt": cl.get("prompt", ""),
+                                   "characters": ",".join(cl.get("characters") or []),
+                                   "shots": ",".join(cl.get("shot_ids") or []),
+                                   "ratio": cl.get("ratio", ""), "references": inp.get("reference") or []}
+        for sp in by_id.values():
+            sp["sample"] = bool(sample)
+            self.enqueue(sp, start=True)
+        return len(by_id)
+
     def stop(self):
         with self.lock:
             self._stop = True
@@ -426,19 +452,22 @@ class ReviewState:
                 "note": it.get("review_note", ""), "status": it.get("status", "draft")}
 
     def _clip_item(self, cl):
-        src = cl.get("video_url") or cl.get("local_path")
-        media = [{"type": "video", "src": _media_url(src),
-                  "name": os.path.basename(src) if src and not src.startswith("http") else (cl["id"] + ".mp4"),
-                  "caption": f"{cl.get('kind','')} {cl.get('resolution','')}"}] if src else []
+        def part(kind):
+            p = cl.get(kind) or {}
+            src = p.get("video_url") or p.get("local_path")
+            media = [{"type": "video", "src": _media_url(src),
+                      "name": os.path.basename(src) if src and not src.startswith("http") else f"{cl['id']}_{kind}.mp4",
+                      "caption": f"{kind} {p.get('resolution', '')}"}] if src else []
+            return {"media": media, "status": p.get("status", "draft"),
+                    "resolution": p.get("resolution", ""), "duration": p.get("duration", "")}
         inp = cl.get("inputs", {})
-        return {"id": cl["id"], "title": cl["id"],
-                "meta": f"{cl.get('kind','')} · {cl.get('mode','')}",
+        return {"id": cl["id"], "title": cl["id"], "meta": cl.get("mode", ""),
                 "prompt": cl.get("prompt", ""), "model": cl.get("model", ""),
-                "resolution": cl.get("resolution", "480p"), "duration": cl.get("duration", 5),
-                "ratio": cl.get("ratio", ""),
+                "duration": cl.get("duration", 5), "ratio": cl.get("ratio", ""),
                 "references": _ref_list(inp.get("reference", [])),
-                "media": media, "decision": cl.get("review_decision", "通过"),
-                "note": cl.get("review_note", ""), "status": cl.get("status", "draft")}
+                "sample": part("sample"), "final": part("final"),
+                "decision": cl.get("review_decision", "通过"),
+                "note": cl.get("review_note", ""), "status": cl.get("review_status", "draft")}
 
     def _export_item(self, e):
         src = e.get("local_path") or e.get("video_url")
@@ -560,7 +589,37 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if parsed.path == "/api/export-zip":
+            # 打包下载全部素材：中间图像 + 视频片段 + 成片导出（assets/ + output/）
+            data = self._build_zip()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="drama_export.zip"')
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self.send_error(404)
+
+    def _build_zip(self):
+        """把 assets/（图像/参考）与 output/（视频片段+成片）打成一个 zip，返回字节。"""
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        roots = ["assets", "output"]
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root in roots:
+                base = os.path.join(self.project, root)
+                if not os.path.isdir(base):
+                    continue
+                for dirpath, _dirs, files in os.walk(base):
+                    for fn in files:
+                        if fn.startswith("."):
+                            continue
+                        full = os.path.join(dirpath, fn)
+                        zf.write(full, os.path.relpath(full, self.project))
+        return buf.getvalue()
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -618,6 +677,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/generate":
             # 用户在 UI 触发生成：把待生成草稿转入队列。scope: {all}/{category}/{categories}/{category,id}
             n = self.gq.start_drafts(body or {"all": True})
+            self._send_json({"ok": True, "started": n})
+            return
+        if parsed.path == "/api/generate-clips":
+            # 一键生成所有视频片段的样片(sample=true)或成片(sample=false)
+            n = self.gq.generate_clips(bool(body.get("sample")))
             self._send_json({"ok": True, "started": n})
             return
         if parsed.path == "/api/shutdown":
@@ -838,7 +902,7 @@ textarea:focus,input:focus,select:focus{outline:none;border-color:var(--accent);
 <div class="toast" id="toast"></div>
 
 <script>
-let S=null, CUR=null, TASK={}, TOTS=null, POLL_T=null;
+let S=null, CUR=null, TASK={}, TOTS=null, POLL_T=null, VMODE='sample';   // VMODE: 视频子页 样片/成片
 const $=s=>document.querySelector(s);
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2600);}
 function zoom(src,name){$('#lbimg').src=src;const d=$('#lbdl');d.href=src;d.download=name||'image';$('#lb').classList.add('show');}
@@ -871,7 +935,13 @@ function renderNav(){const byKey={};S.categories.forEach(c=>byKey[c.key]=c);
   (S.stages||[]).forEach(stg=>{const st=stageState(stg);
     const mark=st==='active'?'<span class="dot"></span>':st==='done'?'<span class="okdot">✓</span>':'';
     html+=`<div class="nav-stage ${st}"><span class="sn">${stg.n}</span><span class="sl">${stg.label}</span>${mark}</div>`;
-    stg.cats.forEach(k=>{const c=byKey[k];if(!c)return;const a=catTasks(k).length;
+    stg.cats.forEach(k=>{const c=byKey[k];if(!c)return;
+      if(k==='clips'){   // 视频片段拆成两个子页：样片生成 / 成片生成
+        [['sample','样片生成'],['final','成片生成']].forEach(([m,label])=>{
+          const a=catTasks('clips').filter(t=>{const s=t.spec||{};return (s.sample?'sample':'final')===m;}).length;
+          html+=`<div class="nav-i${(CUR==='clips'&&VMODE===m)?' active':''}" onclick="select('clips','${m}')"><span class="ico">🎞️</span><span class="nl">${label}</span><span class="cnt">${a?'<span class=dot></span>':''}${c.count}</span></div>`;});
+        return;}
+      const a=catTasks(k).length;
       html+=`<div class="nav-i${k===CUR?' active':''}" onclick="select('${k}')"><span class="ico">${ICONS[c.icon]||'•'}</span><span class="nl">${c.label}</span><span class="cnt">${a?'<span class=dot></span>':''}${c.count}</span></div>`;});
   });
   $('#nav').innerHTML=html;}
@@ -879,13 +949,18 @@ const GUIDE={
   characters:'阶段1·设定：先确认角色三视图——它会作为后续分镜/视频锁脸/锁服装的参考。逐项「通过/需修改」，不满意就改提示词「重新生成」。',
   scenes:'阶段1·设定：确认场景图（纯环境、无人物）。角色+场景都确认后，在对话里说「继续」，我来生成分镜。',
   shots:'阶段2·分镜：每张分镜已自动参考阶段1 的人设图+场景图（参考图见下方）。确认机位与构图后说「继续」，我来出视频。',
-  clips:'阶段3·成片：建议先出 480p 样片确认，再升成片。可在卡片上调分辨率/时长后「重新生成」。',
-  exports:'阶段4·导出：把已生成的视频片段按剧情时间顺序拼接成一条成片。顺序由 AI 结合你的需求排定，点「合成导出」生成，完成后可下载（需要 ffmpeg）。'};
+  exports:'阶段4·导出：把已生成的视频片段按剧情时间顺序拼接成一条成片，并可打包下载全部素材。顺序由 AI 结合你的需求排定，点「合成导出」生成（需要 ffmpeg）。'};
 function setGuide(key){const g=$('#guide');const has=S.has_key;
   if(!has){g.className='guide warn';g.innerHTML='⚠ 还没配置 API Key，无法生成。请先在 <a onclick="openSettings()">设置 · 填 Key</a>。';return;}
-  g.className='guide';g.textContent=GUIDE[key]||'';}
-function select(key){CUR=key;const cat=S.categories.find(c=>c.key===key)||{};
-  $('#cat-title').textContent=cat.label||'';$('#cat-sub').textContent=`${cat.count||0} 项`;
+  g.className='guide';
+  if(key==='clips'){g.textContent=VMODE==='sample'
+    ?'阶段3·样片生成：先出 480p 样片快速预览、最省积分。不满意就改卡片提示词/参考图（或让 AI 调整）后重出；满意后去「成片生成」出高清。'
+    :'阶段3·成片生成：样片确认 OK 后，在这里出高清成片（默认 720p/1080p，可在卡片调）。样片与成片各自独立保留。';return;}
+  g.textContent=GUIDE[key]||'';}
+function select(key,mode){CUR=key;if(key==='clips'&&mode)VMODE=mode;
+  const cat=S.categories.find(c=>c.key===key)||{};
+  const title=key==='clips'?(VMODE==='sample'?'样片生成':'成片生成'):(cat.label||'');
+  $('#cat-title').textContent=title;$('#cat-sub').textContent=`${cat.count||0} 项`;
   const stg=(S.stages||[]).find(x=>x.cats.includes(key));
   $('#stage-tag').textContent=stg?`阶段 ${stg.n} · ${stg.label}`:'';
   setGuide(key);renderNav();renderCards();
@@ -898,12 +973,13 @@ function mediaHTML(m){if(!m.src)return '';
 function opt(list,val){return list.map(o=>{const v=typeof o==='string'?o:o.id;const lab=typeof o==='string'?o:`${o.id}（~${o.price}元/张）`;return `<option value="${v}"${v===val?' selected':''}>${lab}</option>`;}).join('');}
 function setBox(it){const o=S.options;
   if(CUR==='exports')return '';   // 导出无生成参数（顺序见上方，画幅取全局）
-  if(CUR==='clips')return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 本片生成设置（覆盖全局）</div><div class="sgrid">
+  if(CUR==='clips'){const res=(it[VMODE]||{}).resolution||(VMODE==='sample'?S.config.video.resolution_sample:S.config.video.resolution_final);
+    return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 ${VMODE==='sample'?'样片':'成片'}生成设置（覆盖全局）</div><div class="sgrid">
     <label>模型<select data-f="model">${opt(o.video_models,it.model||S.config.video.model)}</select></label>
-    <label>分辨率<select data-f="resolution">${opt(o.resolutions,it.resolution)}</select></label>
+    <label>分辨率<select data-f="resolution">${opt(o.resolutions,res)}</select></label>
     <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
     <label>时长(秒)<input type="number" data-f="duration" min="4" max="15" value="${it.duration||5}"></label>
-  </div><label class="chk" style="margin-top:9px"><input type="checkbox" data-f="sample"> 用样片(更省积分)重生成</label></div>`;
+  </div></div>`;}
   return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 本图生成设置（覆盖全局）</div><div class="sgrid">
     <label>模型<select data-f="model">${opt(o.image_models,it.model||S.config.image.model)}</select></label>
     <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
@@ -918,16 +994,20 @@ function statHTML(t){if(!t)return '';
   if(t.status==='failed')return `<div class="cstat"><div class="errbox">${esc(t.message||'生成失败')}</div></div>`;
   return '';}
 
-function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
-  const st=t?t.status:(it.media&&it.media.length?'done':'idle');
+function cardHTML(it){const isClip=CUR==='clips', isExport=CUR==='exports';
+  const sub=isClip?(it[VMODE]||{}):null;
+  const media=isClip?(sub.media||[]):(it.media||[]);
+  const t=TASK[tkey(CUR,it.id)];
+  const tMode=(isClip&&t&&t.spec)?(t.spec.sample?'sample':'final'):null;
+  const ct=isClip?(t&&tMode===VMODE?t:null):t;   // 任务是否属于当前样片/成片子页
+  const st=ct?ct.status:(media.length?'done':(isClip?'draft':'idle'));
   const cls=st==='running'?'running':st==='queued'?'queued':st==='draft'?'draft':st==='failed'?'failed':(it.decision==='需修改'?'rev':'');
   const badge={done:'<span class="badge done">✓ 完成</span>',running:'<span class="badge running">⟳ 生成中</span>',
     queued:'<span class="badge queued">排队中</span>',draft:'<span class="badge queued">✦ 待生成</span>',failed:'<span class="badge failed">✕ 失败</span>'}[st]||'';
-  const isExport=CUR==='exports';
   let mediaArea;
   if(st==='running'||st==='queued') mediaArea=`<div class="skeleton">${st==='queued'?'等待前序任务…':isExport?'拼接中…':'渲染中…'}</div>`;
-  else if(st==='draft') mediaArea='<div class="skeleton">（待生成 · 确认后点「生成」）</div>';
-  else{const m=(it.media||[]).map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
+  else if(st==='draft') mediaArea=`<div class="skeleton">（${isClip?(VMODE==='sample'?'待出样片 · 点「生成样片」':'待出成片 · 点「生成成片」'):'待生成 · 确认后点「生成」'}）</div>`;
+  else{const m=media.map(x=>`<div>${mediaHTML(x)}${x.caption?`<div class="cap">${x.caption}</div>`:''}</div>`).join('');
     mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
   const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button></div>`).join('');
   const editBlock=isExport?`<div class="lbl">拼接顺序（${(it.order||[]).length} 段 · 由 AI 按剧情排定）</div><div class="cmsg" style="font-family:inherit;color:var(--mut)">${(it.order||[]).map(esc).join(' → ')||'（未指定，请让 AI 排定）'}</div>`
@@ -935,12 +1015,13 @@ function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
     <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
   const okOn=it.decision!=='需修改';
   const busy=(st==='running'||st==='queued');
-  const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':'生成'}</button>`
+  const gw=isClip?(VMODE==='sample'?'样片':'成片'):'';
+  const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':isClip?'生成'+gw:'生成'}</button>`
     :st==='failed'?`<button class="btn regen" onclick="regen(this)">↻ ${isExport?'重试导出':'重试'}</button>`
-    :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':'重新生成这一张'}</button>`;
+    :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':isClip?'重出'+gw:'重新生成这一张'}</button>`;
   return `<div class="card ${cls}" data-id="${it.id}">
     <div class="ch"><h3>${esc(it.title)}</h3>${it.meta?`<span class="pill" title="${escA(it.meta)}">${esc(it.meta)}</span>`:''}${badge}</div>
-    ${statHTML(t)}
+    ${statHTML(ct)}
     ${mediaArea}
     ${editBlock}
     ${setBox(it)}
@@ -960,7 +1041,10 @@ function renderCards(){const items=(S.items[CUR]||[]).slice();
   const ids=new Set(items.map(it=>it.id));
   // 首次生成的资产在完成前不在 state 里——把它们的任务也渲染成占位卡片，实时显示状态
   Object.values(TASK).forEach(t=>{ if(t.category===CUR && !ids.has(t.item_id)){ items.push(taskItem(t)); ids.add(t.item_id); }});
-  if(items.length){$('#cards').innerHTML=items.map(cardHTML).join('');return;}
+  // 导出页顶部放「打包下载全部」（中间图像+片段+成片）；用 grid-column 跨满整行
+  const zipBar=CUR==='exports'?`<div class="setbox" style="grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><div class="lbl" style="margin:0">📦 打包下载本项目全部素材：中间图像（人设/场景/分镜）+ 视频片段 + 成片导出</div><a class="btn" href="/api/export-zip" download>⬇ 打包下载全部</a></div>`:'';
+  if(items.length){$('#cards').innerHTML=zipBar+items.map(cardHTML).join('');return;}
+  if(zipBar){$('#cards').innerHTML=zipBar+'<div class="empty" style="grid-column:1/-1;min-height:30vh"><div class="ico">📽️</div><h3>成片导出</h3><p>让 AI 把要拼接的片段按剧情排好顺序，这里点「合成导出」即可生成整片；上面可随时打包下载全部素材。</p></div>';return;}
   const cat=S.categories.find(c=>c.key===CUR)||{};
   const ico={characters:'🧑',scenes:'🏙️',shots:'🎬',clips:'🎞️',exports:'📽️'}[CUR]||'✨';
   const hint=S.has_key
@@ -1010,11 +1094,13 @@ function cardFields(card){const o={};card.querySelectorAll('[data-f]').forEach(e
   o.references=[...card.querySelectorAll('.ref')].filter(d=>d.dataset.added!=='1'&&d.dataset.path).map(d=>d.dataset.path);
   o.references_add=PENDING[card.dataset.id]||[];return o;}
 async function regen(btn){const card=btn.closest('.card');const id=card.dataset.id;const f=cardFields(card);
+  if(CUR==='clips')f.sample=(VMODE==='sample');            // 视频：按当前子页出样片/成片
   const res=await api('/api/regenerate',Object.assign({category:CUR,id},f));
   if(!res.ok){toast('入队失败');return;}
   PENDING[id]=[];toast('已加入生成队列：'+id);
   const k=tkey(CUR,id),old=TASK[k]||{};                  // 乐观更新：立刻把卡片标成「排队中」，不等下一次轮询
-  TASK[k]=Object.assign({},old,res.task||{status:'queued'},{category:CUR,item_id:id,spec:old.spec||f});
+  const sp=Object.assign({},old.spec||{},f);
+  TASK[k]=Object.assign({},old,res.task||{status:'queued'},{category:CUR,item_id:id,spec:sp});
   renderCards();poll(true);}                               // 强制重渲染（即使有输入框聚焦），再轮询看实时进度
 
 async function poll(force){let r=null;
@@ -1040,10 +1126,16 @@ async function poll(force){let r=null;
 }
 function curStageCats(){const stg=(S.stages||[]).find(x=>x.cats.includes(CUR));return stg?stg.cats:[CUR];}
 function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
-  const cats=curStageCats();   // 「开始生成」只作用于当前阶段
-  const sd=r.tasks.filter(x=>x.status==='draft'&&cats.includes(x.category)).length;
-  gen.style.display=sd?'inline-flex':'none';
-  gen.textContent=`▶ 开始生成（${sd}）`;
+  if(CUR==='clips'){   // 视频：一键生成本子页全部（样片或成片），不是只生成草稿
+    const cnt=(S.items.clips||[]).length;
+    gen.style.display=cnt?'inline-flex':'none';
+    gen.textContent=`▶ 一键生成${VMODE==='sample'?'样片':'成片'}（${cnt}）`;
+  }else{
+    const cats=curStageCats();   // 「开始生成」只作用于当前阶段
+    const sd=r.tasks.filter(x=>x.status==='draft'&&cats.includes(x.category)).length;
+    gen.style.display=sd?'inline-flex':'none';
+    gen.textContent=`▶ 开始生成（${sd}）`;
+  }
   if(r.generating){pb.classList.remove('hide');
     $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.failed?' / '+t.failed+' 失败':''}`;
     $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-t.draft)*100):0)+'%';
@@ -1051,7 +1143,10 @@ function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
   else{pb.classList.add('hide');
     if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败，可在卡片上「重试」`;}}
 }
-async function generateAll(){const r=await api('/api/generate',{categories:curStageCats()});
+async function generateAll(){
+  if(CUR==='clips'){const r=await api('/api/generate-clips',{sample:VMODE==='sample'});
+    toast(r.started?(`开始生成${VMODE==='sample'?'样片':'成片'} ${r.started} 段`):'没有可生成的视频片段（先让 AI 备好 clip 任务）');poll(true);return;}
+  const r=await api('/api/generate',{categories:curStageCats()});
   toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll(true);}
 async function stopAll(){await api('/api/stop',{});toast('已请求停止：排队任务取消，当前任务跑完即停');poll(true);}
 async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;

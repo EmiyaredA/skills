@@ -22,7 +22,11 @@ STAGE_LABEL = {1: "设定(人设+场景)", 2: "分镜", 3: "成片(视频)", 4: 
 def _done(cat, it):
     if cat == "characters":
         return bool(it.get("three_view") or it.get("image"))
-    if cat in ("clips", "exports"):
+    if cat == "clips":
+        # 样片或成片任一已生成即视为有产出
+        return any((it.get(k) or {}).get("local_path") or (it.get(k) or {}).get("video_url")
+                   for k in ("sample", "final"))
+    if cat == "exports":
         return bool(it.get("video_url") or it.get("local_path"))
     return bool(it.get("image"))
 

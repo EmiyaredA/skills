@@ -79,11 +79,12 @@ def main():
         print("❌ 未指定要拼接的 clip（--ids 为空）。")
         raise SystemExit(2)
 
-    # 解析每个 clip 的本地视频文件（须已生成）
+    # 解析每个 clip 的本地视频文件（优先成片，回退样片）
     paths, missing = [], []
     for cid in clip_ids:
-        cl = pu.find(state.get("clips", []), cid)
-        lp = (cl or {}).get("local_path")
+        cl = pu.find(state.get("clips", []), cid) or {}
+        part = cl.get("final") or cl.get("sample") or {}
+        lp = part.get("local_path")
         full = os.path.join(args.project, lp) if lp else None
         if full and os.path.exists(full):
             paths.append((cid, full))
