@@ -12,15 +12,16 @@ import os
 import shutil
 import subprocess
 
+import ensure_env as env
 import project_utils as pu
 
-# 各画幅的导出尺寸（竖屏短剧默认 9:16）
+# 各画幅的导出尺寸（默认 16:9）
 RATIO_DIMS = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080),
               "4:3": (1440, 1080), "3:4": (1080, 1440)}
 
 
 def has_ffmpeg():
-    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    return env.has_ffmpeg()
 
 
 def has_audio(path):
@@ -70,9 +71,14 @@ def main():
 
     state = pu.load_state(args.project)
     if not has_ffmpeg():
-        print("❌ 未检测到 ffmpeg/ffprobe，无法拼接导出。请先安装：macOS `brew install ffmpeg`，"
-              "Linux `apt install ffmpeg`。安装后回到应用重新点「合成导出」。")
-        raise SystemExit(2)
+        print("未检测到 ffmpeg/ffprobe，尝试自动安装…", flush=True)
+        ok, _, msgs = env.ensure(["ffmpeg"], install=True)
+        for m in msgs:
+            print(f"  {m}", flush=True)
+        if not ok:
+            print("❌ 无法拼接导出：ffmpeg 仍未就绪。助手应运行 "
+                  "`python scripts/ensure_env.py --install --export` 后重试。")
+            raise SystemExit(2)
 
     clip_ids = [c.strip() for c in args.ids.split(",") if c.strip()]
     if not clip_ids:
@@ -94,7 +100,7 @@ def main():
         print(f"❌ 这些 clip 还没生成或找不到视频文件：{','.join(missing)}。请先在阶段3 生成它们再导出。")
         raise SystemExit(2)
 
-    ratio = args.ratio or state.get("config", {}).get("ratio", "9:16")
+    ratio = args.ratio or state.get("config", {}).get("ratio", "16:9")
     w, h = RATIO_DIMS.get(ratio, (1080, 1920))
 
     outdir = pu.subdir(args.project, "output")

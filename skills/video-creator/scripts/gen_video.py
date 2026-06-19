@@ -16,6 +16,7 @@
 """
 import argparse
 import os
+import sys
 
 import sa_client as sa
 import project_utils as pu
@@ -162,4 +163,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except sa.APIError as e:
+        print(f"sa_client.APIError: {e}", file=sys.stderr)
+        raise SystemExit(1)

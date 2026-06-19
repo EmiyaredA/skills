@@ -2,6 +2,6 @@
 # 可选依赖：
 #   Pillow  —— 多角色/场景分镜把多张参考图拼成一张「参考拼贴」喂给单参考图的图像 API（gen_image）。
 #             缺失时自动回退为只用第一张参考图。安装：pip install Pillow
-#   ffmpeg  —— 阶段4「成片导出」按序拼接视频片段用（concat_clips.py）。缺失时导出任务会明确报错提示安装。
-#             macOS: brew install ffmpeg ；Linux: apt install ffmpeg
+#   ffmpeg  —— 阶段4「成片导出」拼接用。缺时 ensure_env.py / concat_clips 会尝试自动安装。
+#             助手也可：python scripts/ensure_env.py --install --export
 Pillow>=9

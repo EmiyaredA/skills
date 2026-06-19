@@ -27,8 +27,8 @@ def main():
     assert "api_key" not in json.load(open(pu.state_path(proj), encoding="utf-8"))["config"], "Key 不应进入 config"
 
     run(["gen_image.py", "--project", proj, "--type", "character", "--id", "char_01",
-         "--name", "林夏", "--prompt", "25岁女性，短发，米色风衣",
-         "--views", "front,side,back", "--mock"])
+         "--name", "林夏", "--prompt", "25岁女性，短发，米色风衣，单张角色三视图设定图",
+         "--mock"])
     run(["gen_image.py", "--project", proj, "--type", "scene", "--id", "scene_01",
          "--name", "便利店", "--prompt", "深夜便利店，冷白光", "--mock"])
     run(["gen_image.py", "--project", proj, "--type", "shot", "--id", "shot_01",

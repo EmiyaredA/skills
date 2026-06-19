@@ -12,6 +12,7 @@ import json
 import os
 
 import project_utils as pu
+import ensure_env as env
 
 # (分类key, 显示名, 阶段)
 CATS = [("characters", "角色三视图", 1), ("scenes", "场景", 1),
@@ -57,6 +58,7 @@ def build(project):
         if next_stage is None and (not allit or not s["all_done"] or s["needs_revision"]):
             next_stage = stg
     out["next_stage"] = next_stage          # None = 全部阶段都已完成
+    out["env"] = env.env_snapshot()
     return out
 
 
@@ -69,6 +71,9 @@ def main():
     if not args.json:
         print(f"项目：{data['title']}  ({data['project']})")
         print(f"API Key：{'已配置' if data['has_key'] else '未配置'}")
+        e = data.get("env") or {}
+        print(f"环境：ffmpeg={'✓' if e.get('ffmpeg') else '✗'}  Pillow={'✓' if e.get('pillow') else '✗'}"
+              + ("" if e.get("export_ready") else "  ⚠ 阶段4 导出需 ffmpeg"))
         for s in data["stages"]:
             flag = "✅完成" if s["all_done"] else ("◻空" if not s["count"] else "…进行中")
             print(f"\n阶段{s['stage']} {s['label']}  [{flag}]  共{s['count']}项")

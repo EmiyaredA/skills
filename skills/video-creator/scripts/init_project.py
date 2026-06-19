@@ -2,7 +2,7 @@
 
 两种用法：
   # ① 显式项目目录
-  python init_project.py --project ./my-drama --title "深夜便利店" --ratio 9:16
+  python init_project.py --project ./my-drama --title "深夜便利店" --ratio 16:9
 
   # ② 在「总工作目录」下自动新建一个带唯一 id 的子目录作为本轮项目（隔离不同对话，推荐）
   python init_project.py --parent /abs/总工作目录 --title "深夜便利店"

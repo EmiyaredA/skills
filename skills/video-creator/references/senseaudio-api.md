@@ -5,10 +5,11 @@
 - **基础地址**：`https://api.senseaudio.cn`
 - **鉴权**：请求头 `Authorization: Bearer <SENSEAUDIO_API_KEY>`
 - **获取 Key**：https://senseaudio.cn/api-platform/api-key
-- **环境变量**：脚本读取 `SENSEAUDIO_API_KEY`（必填）、`SENSEAUDIO_BASE_URL`（可选）
+- **环境变量**：`SENSEAUDIO_API_KEY`（优先）、`SENSEAUDIO_BASE_URL`（可选）
+- **项目 Key**：项目根 `.sa_key`（用户在应用 `#config` 填写；`save_key.py` 写入），环境变量未设置时回退读取
 - 请求/响应均为 `application/json`，UTF-8；错误含 `code` / `message`。
 
-> 切勿把 Key 写入 `state.json` 或提交到 git。脚本只从环境变量读取。
+> 切勿把 Key 写入 `state.json` 或提交到 git。
 
 ---
 
@@ -62,7 +63,7 @@
     { "type": "video", "video_url": "https://已托管/前置.mp4" },
     { "type": "audio", "audio_url": "..." }
   ],
-  "duration": 8,
+  "duration": 10,
   "resolution": "720p",
   "ratio": "9:16",
   "watermark": true,

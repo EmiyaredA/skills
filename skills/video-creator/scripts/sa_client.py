@@ -55,6 +55,21 @@ class APIError(Exception):
     pass
 
 
+def format_video_error(raw_msg):
+    """把平台 error_message 转成可操作的中文说明（版权拦截等）。"""
+    msg = (raw_msg or "未知错误").strip()
+    low = msg.lower()
+    if "copyright" in low or "版权" in msg:
+        return (
+            "视频生成被平台版权策略拦截：参考图或角色设定可能含有受版权保护的作品"
+            "（如游戏/动漫 IP、官方宣传图等）。图像阶段可能通过，但视频审核更严格。"
+            "建议：① 阶段1 改用原创角色参考图重新生成人设；"
+            "② 提示词避免描述具体 IP 角色特征；③ 再重试样片。"
+            f"（平台返回：{msg}）"
+        )
+    return f"视频生成失败：{msg}"
+
+
 def _key():
     # 1) 环境变量（SoWork 平台注入时优先）
     k = os.environ.get("SENSEAUDIO_API_KEY")
@@ -266,7 +281,7 @@ def video_poll(task_id, poll_interval=8, max_wait=1800, on_progress=None):
                 raise APIError(f"视频已完成但缺少 video_url：{st}")
             return st
         if status == "failed":
-            raise APIError(f"视频生成失败：{st.get('error_message')}")
+            raise APIError(format_video_error(st.get("error_message")))
         time.sleep(poll_interval)
         waited += poll_interval
     raise APIError(f"视频生成超时（task_id={task_id}）")

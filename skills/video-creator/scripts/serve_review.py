@@ -4,7 +4,7 @@
 - 助手只**准备**任务（plan.json / POST /api/plan，落为「待生成」草稿）并打开网页；**生成由用户在 UI 点「开始生成」触发**。
   生成后用后台 worker 池**并行**跑（默认 4 路），每个资产是占位卡片，带状态（待生成/排队/生成中%/完成/失败）+ 顶部总进度。
 - 生成分阶段、队列按阶段门控：阶段1 人设+场景 → 阶段2 分镜（用人设/场景图作参考）→ 阶段3 视频 → 阶段4 导出。
-- 用户在页面上看进度；完成的卡片可立刻改提示词/参考图/模型/设置并「重新生成」，失败的可「重试」；
+- 用户在页面上看进度；完成的卡片可立刻改提示词/参考图/模型/设置并「重新生成」；失败/超时会**自动重试最多 3 次**，仍失败可在卡片上手动「重试」；
   点侧边栏「设置」随时改全局配置/Key、即时落盘生效。
 - 服务**常驻**（无「继续/重做」提交闭环）。助手续作下一阶段时：读 /api/state 判断阶段 → POST /api/plan 推进。
   停止：用户点侧边栏「关闭服务」、助手 `--stop`、或 kill serve.pid。
@@ -50,11 +50,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import sa_client as sa
 import project_utils as pu
+import ensure_env as env
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RATIOS = ["9:16", "16:9", "4:3", "3:4", "1:1"]
+RATIOS = ["16:9", "9:16", "4:3", "3:4", "1:1"]
 RESOLUTIONS = ["480p", "720p", "1080p"]
 PCT = re.compile(r"(\d{1,3})%")
+MAX_RETRIES = 3  # 失败/超时后自动重试次数（不含首次）
 
 CATEGORIES = [
     {"key": "characters", "label": "角色三视图", "icon": "user", "kind": "image"},
@@ -91,11 +93,6 @@ def _ref_list(*vals):
             if r and r not in out:
                 out.append(r)
     return out
-
-
-def save_datauri(project, name, uri):
-    """把上传的 data URI 落盘到 assets/refs/，返回相对路径（薄封装 pu.save_data_uri）。"""
-    return pu.save_data_uri(project, name, uri)
 
 
 def est_cost(key, spec):
@@ -195,6 +192,7 @@ class GenQueue:
         self.specs = {}          # key -> 最近一次完整 spec（用于重试保留原始参数）
         self.seq = 0
         self._stop = False
+        self._procs = {}         # task_key -> 运行中的 subprocess
         self.workers = []        # 并行 worker 线程池
 
     def _key(self, spec):
@@ -226,6 +224,7 @@ class GenQueue:
                                   and x["status"] != "running")]
             self.tasks.append(t)
         if start:
+            self._stop = False   # 用户显式启动生成，清除之前的「全部停止」标记
             self._ensure_workers()
         return t
 
@@ -243,6 +242,7 @@ class GenQueue:
                     t["status"] = "queued"
                     n += 1
         if n:
+            self._stop = False
             self._ensure_workers()
         return n
 
@@ -272,12 +272,34 @@ class GenQueue:
             self.enqueue(sp, start=True)
         return len(by_id)
 
-    def stop(self):
+    def stop(self, category=None, item_id=None):
+        """停止生成：无 scope 时停全部（含 running）；有 category+id 时只停单项。"""
+        procs_to_kill = []
         with self.lock:
-            self._stop = True
+            targets = []
             for t in self.tasks:
-                if t["status"] == "queued":
-                    t["status"] = "canceled"
+                if t["status"] not in ("queued", "running"):
+                    continue
+                if category and item_id:
+                    if t["category"] == category and t["item_id"] == item_id:
+                        targets.append(t)
+                else:
+                    targets.append(t)
+            if not category:
+                self._stop = True
+            for t in targets:
+                t["status"] = "canceled"
+                t["message"] = "已停止"
+                k = f"{t['category']}::{t['item_id']}"
+                p = self._procs.get(k)
+                if p:
+                    procs_to_kill.append(p)
+        for p in procs_to_kill:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        return len(targets)
 
     def _ensure_workers(self):
         """按并发上限补足 worker（多个 worker 并行从队列取任务）。
@@ -286,9 +308,10 @@ class GenQueue:
         关键：用「并发上限 - 现有 worker」而非「min(并发, 已排队) - worker」，
         否则任务陆续到达（先到的已转 running、不再计入 queued）时池子永远爬不到并发上限。
         """
-        self._stop = False
         with self.lock:
             self.workers = [w for w in self.workers if w.is_alive()]
+            if self._stop:
+                return
             queued = sum(1 for t in self.tasks if t["status"] == "queued")
             need = min(self.concurrency - len(self.workers), queued)
         for _ in range(max(0, need)):
@@ -329,6 +352,82 @@ class GenQueue:
     def _set(self, t, **kw):
         with self.lock:
             t.update(kw)
+
+    @staticmethod
+    def _friendly_fail(tail):
+        """从子进程 stderr/stdout 尾部提取 APIError，并转成可读说明。"""
+        if not tail:
+            return ""
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line.startswith("sa_client.APIError:"):
+                continue
+            msg = line.split("sa_client.APIError:", 1)[-1].strip()
+            low = msg.lower()
+            if "copyright" in low or "版权" in msg or "版权策略" in msg:
+                return msg
+            return msg
+        if "copyright" in tail.lower() or "版权" in tail:
+            return sa.format_video_error(
+                tail.split("error_message")[-1] if "error_message" in tail else tail[-400:]
+            )
+        return tail
+
+    @staticmethod
+    def _retryable_fail(msg):
+        """不可恢复的错误不重试（版权、配置、缺文件等）。"""
+        if not msg:
+            return True
+        low = msg.lower()
+        for s in (
+            "版权", "copyright", "未配置 API Key", "未找到 API Key",
+            "未知分类", "导出环境未就绪", "找不到参考文件",
+        ):
+            if s in msg or s.lower() in low:
+                return False
+        return True
+
+    def _run_gen_subprocess(self, t, spec):
+        """跑一次 gen_*.py 子进程。返回 (成功, 失败说明, 是否用户取消)。"""
+        cmd = build_gen_cmd(self.project, t["category"], spec)
+        if not cmd:
+            return False, f"未知分类：{t['category']}", False
+        buf = []
+        tk = f"{t['category']}::{t['item_id']}"
+        proc = None
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
+            with self.lock:
+                self._procs[tk] = proc
+            for line in proc.stdout:
+                with self.lock:
+                    if t["status"] == "canceled":
+                        proc.terminate()
+                        break
+                buf.append(line)
+                upd = {}
+                m = PCT.search(line)
+                if m:
+                    upd["progress"] = max(0, min(100, int(m.group(1))))
+                ln = line.strip()
+                if ln:
+                    upd["message"] = ln[:140]
+                if upd:
+                    self._set(t, **upd)
+            proc.wait()
+        except Exception as e:
+            return False, f"启动生成失败：{e}", False
+        finally:
+            with self.lock:
+                self._procs.pop(tk, None)
+        with self.lock:
+            if t["status"] == "canceled":
+                return False, "", True
+        if proc.returncode == 0:
+            return True, "", False
+        tail = "".join(buf).strip()[-1200:]
+        return False, self._friendly_fail(tail) or "生成失败", False
 
     def _resolve_refs(self, spec, key):
         """分镜/视频生成前，自动从已完成的阶段1 结果补全 characters 与参考图（人设图+场景图）。
@@ -372,35 +471,31 @@ class GenQueue:
         if not pu.has_key(self.project):
             self._set(t, status="failed", message="未配置 API Key，无法生成。请在配置阶段填写 Key。")
             return
+        if t["category"] == "exports" and not env.has_ffmpeg():
+            ok, _, msgs = env.ensure(["ffmpeg"], install=True)
+            if not ok:
+                self._set(t, status="failed",
+                           message="导出环境未就绪（缺 ffmpeg）：\n" + "\n".join(msgs))
+                return
         spec = self._resolve_refs(spec, t["category"])   # 自动补全分镜/视频的角色与参考图
-        cmd = build_gen_cmd(self.project, t["category"], spec)
-        if not cmd:
-            self._set(t, status="failed", message=f"未知分类：{t['category']}")
-            return
-        buf = []
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1)
-            for line in proc.stdout:
-                buf.append(line)
-                upd = {}
-                m = PCT.search(line)
-                if m:
-                    upd["progress"] = max(0, min(100, int(m.group(1))))
-                ln = line.strip()
-                if ln:
-                    upd["message"] = ln[:140]   # 实时状态行：前端在卡片上显示"正在做什么"
-                if upd:
-                    self._set(t, **upd)
-            proc.wait()
-        except Exception as e:
-            self._set(t, status="failed", message=f"启动生成失败：{e}")
-            return
-        if proc.returncode == 0:
-            self._set(t, status="done", progress=100, message="")
-        else:
-            tail = "".join(buf).strip()[-1200:]
-            self._set(t, status="failed", message=tail or "生成失败")
+        last_msg = "生成失败"
+        for attempt in range(MAX_RETRIES + 1):
+            if attempt > 0:
+                self._set(t, status="running", progress=None,
+                          message=f"第 {attempt}/{MAX_RETRIES} 次重试…")
+            ok, msg, canceled = self._run_gen_subprocess(t, spec)
+            if canceled:
+                return
+            if ok:
+                self._set(t, status="done", progress=100, message="")
+                return
+            last_msg = msg
+            if attempt >= MAX_RETRIES or not self._retryable_fail(msg):
+                break
+        fail_msg = last_msg
+        if attempt > 0 and self._retryable_fail(last_msg):
+            fail_msg = f"{last_msg}\n（已自动重试 {min(attempt, MAX_RETRIES)} 次，仍失败）"
+        self._set(t, status="failed", message=fail_msg)
 
     def snapshot(self):
         with self.lock:
@@ -499,7 +594,8 @@ class ReviewState:
 
     def payload(self):
         state = self.load()
-        cfg = state.get("config", pu.default_config())
+        cfg = pu.default_config()
+        pu.deep_merge(cfg, state.get("config") or {})
         cats, items = [], {}
         for c in CATEGORIES:
             its = self.items(state, c["key"])
@@ -665,8 +761,9 @@ class Handler(BaseHTTPRequestHandler):
             self._enqueue_edit(body)
             return
         if parsed.path == "/api/stop":
-            self.gq.stop()
-            self._send_json({"ok": True})
+            cat, iid = body.get("category"), body.get("id")
+            n = self.gq.stop(cat, iid) if cat and iid else self.gq.stop()
+            self._send_json({"ok": True, "stopped": n})
             return
         if parsed.path == "/api/plan":
             # AI 只「准备」任务（draft），不自动生成；用户在 UI 点「开始生成」才真正跑。
@@ -707,7 +804,7 @@ class Handler(BaseHTTPRequestHandler):
         key, iid = body.get("category"), body.get("id")
         refs = list(body.get("references") or [])
         for i, uri in enumerate(body.get("references_add") or []):
-            rel = save_datauri(self.project, f"{iid}_ref_{i}", uri)
+            rel = pu.save_data_uri(self.project, f"{iid}_ref_{i}", uri)
             if rel:
                 refs.append(rel)
         base = dict(self.gq.specs.get(f"{key}::{iid}", {}))
@@ -994,6 +1091,7 @@ function statHTML(t){if(!t)return '';
   if(t.status==='draft')return `<div class="cstat"><div class="cmsg">✦ 已就绪：确认提示词/参考图后点「生成」。</div></div>`;
   if(t.status==='queued')return `<div class="cstat"><div class="cmsg">⏳ 排队中，等待空闲生成位…</div></div>`;
   if(t.status==='running')return `<div class="cstat"><div class="cprog"><span class="track"><span style="display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));width:${t.progress==null?30:t.progress}%;transition:width .3s"></span></span><span class="pp">${t.progress==null?'生成中':t.progress+'%'}</span></div>${t.message?`<div class="cmsg">${esc(t.message)}</div>`:''}</div>`;
+  if(t.status==='canceled')return `<div class="cstat"><div class="cmsg">⏹ 已停止${t.message&&t.message!=='已停止'?(' · '+esc(t.message)):''}</div></div>`;
   if(t.status==='failed')return `<div class="cstat"><div class="errbox">${esc(t.message||'生成失败')}</div></div>`;
   return '';}
 
@@ -1006,7 +1104,8 @@ function cardHTML(it){const isClip=CUR==='clips', isExport=CUR==='exports';
   const st=ct?ct.status:(media.length?'done':(isClip?'draft':'idle'));
   const cls=st==='running'?'running':st==='queued'?'queued':st==='draft'?'draft':st==='failed'?'failed':(it.decision==='需修改'?'rev':'');
   const badge={done:'<span class="badge done">✓ 完成</span>',running:'<span class="badge running">⟳ 生成中</span>',
-    queued:'<span class="badge queued">排队中</span>',draft:'<span class="badge queued">✦ 待生成</span>',failed:'<span class="badge failed">✕ 失败</span>'}[st]||'';
+    queued:'<span class="badge queued">排队中</span>',draft:'<span class="badge queued">✦ 待生成</span>',
+    failed:'<span class="badge failed">✕ 失败</span>',canceled:'<span class="badge queued">⏹ 已停止</span>'}[st]||'';
   let mediaArea;
   if(st==='running'||st==='queued') mediaArea=`<div class="skeleton">${st==='queued'?'等待前序任务…':isExport?'拼接中…':'渲染中…'}</div>`;
   else if(st==='draft') mediaArea=`<div class="skeleton">（${isClip?(VMODE==='sample'?'待出样片 · 点「生成样片」':'待出成片 · 点「生成成片」'):'待生成 · 确认后点「生成」'}）</div>`;
@@ -1019,8 +1118,9 @@ function cardHTML(it){const isClip=CUR==='clips', isExport=CUR==='exports';
   const okOn=it.decision!=='需修改';
   const busy=(st==='running'||st==='queued');
   const gw=isClip?(VMODE==='sample'?'样片':'成片'):'';
+  const stopBtn=busy?`<button class="btn ghost sm" onclick="stopOne(this)">⏹ 停止</button>`:'';
   const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':isClip?'生成'+gw:'生成'}</button>`
-    :st==='failed'?`<button class="btn regen" onclick="regen(this)">↻ ${isExport?'重试导出':'重试'}</button>`
+    :st==='failed'||st==='canceled'?`<button class="btn regen" onclick="regen(this)">↻ ${isExport?'重试导出':isClip?'重试'+gw:'重试'}</button>`
     :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':isClip?'重出'+gw:'重新生成这一张'}</button>`;
   return `<div class="card ${cls}" data-id="${it.id}">
     <div class="ch"><h3>${esc(it.title)}</h3>${it.meta?`<span class="pill" title="${escA(it.meta)}">${esc(it.meta)}</span>`:''}${badge}</div>
@@ -1031,7 +1131,7 @@ function cardHTML(it){const isClip=CUR==='clips', isExport=CUR==='exports';
     <div class="foot">
       <div class="seg"><button class="ok${okOn?' on':''}" onclick="decide(this,'通过')">✓ 通过</button><button class="no${!okOn?' on':''}" onclick="decide(this,'需修改')">✎ 需修改</button></div>
       <input class="note" type="text" data-f="note" placeholder="意见（可留空）" value="${escA(it.note)}">
-      ${action}
+      ${stopBtn}${action}
     </div></div>`;}
 
 function taskItem(t){const s=t.spec||{};   // 把"还没落进 state 的在途任务"合成为占位卡片
@@ -1140,18 +1240,20 @@ function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
     gen.textContent=`▶ 开始生成（${sd}）`;
   }
   if(r.generating){pb.classList.remove('hide');
-    $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.failed?' / '+t.failed+' 失败':''}`;
+    $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.canceled?' / '+t.canceled+' 已停':''}${t.failed?' / '+t.failed+' 失败':''}`;
     $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-t.draft)*100):0)+'%';
     $('#pcost').textContent='~'+r.cost_total+' 元';}
   else{pb.classList.add('hide');
-    if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败，可在卡片上「重试」`;}}
+    if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败（已自动重试），可在卡片上「重试」`;}}
 }
 async function generateAll(){
   if(CUR==='clips'){const r=await api('/api/generate-clips',{sample:VMODE==='sample'});
     toast(r.started?(`开始生成${VMODE==='sample'?'样片':'成片'} ${r.started} 段`):'没有可生成的视频片段（先让 AI 备好 clip 任务）');poll(true);return;}
   const r=await api('/api/generate',{categories:curStageCats()});
   toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll(true);}
-async function stopAll(){await api('/api/stop',{});toast('已请求停止：排队任务取消，当前任务跑完即停');poll(true);}
+async function stopAll(){const r=await api('/api/stop',{});toast(r.stopped?(`已停止 ${r.stopped} 项（含进行中的任务）`):'没有可停止的任务');poll(true);}
+async function stopOne(btn){const card=btn.closest('.card');const id=card.dataset.id;
+  const r=await api('/api/stop',{category:CUR,id});toast(r.stopped?('已停止：'+id):'该任务不在排队/生成中');poll(true);}
 async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;
   try{await api('/api/shutdown',{});}catch(e){}
   document.body.innerHTML='<div style="height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--mut);gap:8px;text-align:center;padding:40px"><div style="font-size:34px">⏻</div><div style="color:var(--ink);font-size:16px;font-weight:600">本地服务已关闭</div><div style="font-size:13.5px">可以关闭此标签页了。需要时在对话里让我重新打开创作台即可。</div></div>';}
