@@ -1046,10 +1046,12 @@ async function poll(){let r;try{r=await api('/api/tasks');}catch(e){setTimeout(p
   if((changed||justFinished||keysetChanged)&&!editing)renderCards();
   setTimeout(poll, r.generating?1200:2500);   // 持续轮询：既看进度，也接住 AI 后续推送的待生成任务
 }
+function curStageCats(){const stg=(S.stages||[]).find(x=>x.cats.includes(CUR));return stg?stg.cats:[CUR];}
 function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
-  const drafts=t.draft||0;
-  gen.style.display=drafts?'inline-flex':'none';
-  gen.textContent=`▶ 开始生成（${drafts}）`;
+  const cats=curStageCats();   // 「开始生成」只作用于当前阶段
+  const sd=r.tasks.filter(x=>x.status==='draft'&&cats.includes(x.category)).length;
+  gen.style.display=sd?'inline-flex':'none';
+  gen.textContent=`▶ 开始生成（${sd}）`;
   if(r.generating){pb.classList.remove('hide');
     $('#ptext').textContent=`⏳ 生成中 · ${t.done} 完成 / ${t.running} 进行 / ${t.queued} 排队${t.failed?' / '+t.failed+' 失败':''}`;
     $('#pfill').style.width=(t.total?Math.round(t.done/Math.max(1,t.total-drafts)*100):0)+'%';
@@ -1057,8 +1059,8 @@ function updateTop(r){const t=r.totals,pb=$('#pbar'),gen=$('#btn-gen');
   else{pb.classList.add('hide');
     if(t.failed){$('#cat-sub').textContent=`有 ${t.failed} 项生成失败，可在卡片上「重试」`;}}
 }
-async function generateAll(){const r=await api('/api/generate',{all:true});
-  toast(r.started?('开始生成 '+r.started+' 项'):'没有待生成的任务');poll();}
+async function generateAll(){const r=await api('/api/generate',{categories:curStageCats()});
+  toast(r.started?('开始生成本阶段 '+r.started+' 项'):'本阶段没有待生成的任务');poll();}
 async function stopAll(){await api('/api/stop',{});toast('已请求停止：排队任务取消，当前任务跑完即停');poll();}
 async function shutdownApp(){if(!confirm('关闭本地服务？关闭后此页面将失效（角色/场景/分镜等成果都已保存在工作目录里，不会丢）。'))return;
   try{await api('/api/shutdown',{});}catch(e){}
@@ -1067,8 +1069,12 @@ function openSettings(){$('#scrim').classList.add('show');$('#drawer').classList
 function closeSettings(){$('#scrim').classList.remove('show');$('#drawer').classList.remove('show');try{history.replaceState(null,'','#'+(CUR||''));}catch(e){}}
 async function saveKey(){const el=$('#apikey');const k=(el.value||'').trim();if(!k){toast('请粘贴 API Key');return;}
   const r=await api('/api/key',{key:k});
-  if(r.ok){S=await api('/api/state');renderSettings();renderNav();renderCards();toast('API Key 已保存，可以开始生成了');}
-  else toast('保存失败：'+(r.error||''));}
+  if(!r.ok){toast('保存失败：'+(r.error||''));return;}
+  S=await api('/api/state');           // 立即刷新整页：设置、引导横幅、侧边栏、卡片
+  renderSettings();setGuide(CUR);renderNav();renderCards();
+  poll._last=null;poll._keys=null;     // 强制下个轮询也重画
+  const fails=Object.values(TASK).filter(t=>t.status==='failed').length;
+  toast('API Key 已保存'+(fails?`，可对 ${fails} 个失败项「重试」或重新「开始生成」`:'，可以开始生成了'));}
 function renderSettings(){const c=S.config,o=S.options;const sel=(f,list,val)=>`<select data-c="${f}">${opt(list,val)}</select>`;
   const keyState=S.has_key?'<span style="color:var(--ok)">· 已配置</span>':'<span style="color:var(--no)">· 未配置，下面填入</span>';
   const access=`<div class="grp" id="grp-access"><div class="t">接入与目录</div>

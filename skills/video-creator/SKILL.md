@@ -64,9 +64,12 @@ license: Complete terms in LICENSE.txt
 - 别在对话里说"我已开始生成/已生成完"——你做的是准备好任务、把 UI 给用户。
 
 ### 如何推进阶段 / 续作（应用是常驻看板）
-- **用户说「继续 / 帮我准备分镜」时**：先读当前阶段——`curl -s http://127.0.0.1:<端口>/api/state`（或读 `state.json`），看哪些资产已有、`review_decision` 是否 `通过`；
-  再**写下一阶段的 plan 任务** `POST /api/plan {"tasks":[…]}`（备为草稿）。任务出现在页面上，用户点「开始生成」即按阶段门控执行。
-- **用户自助**：在应用里改任意卡片的提示词/参考图/模型/设置后「重新生成」、点草稿卡片「生成」、「重试」失败项——不需要你介入。
+- **❗用户说「继续」时，先查"做到哪一步了"**：跑 `python scripts/status.py --project "$P"`（直接读 stdout，**不要用 curl|python 管道**——易出错）。
+  它读 **`state.json`（事实来源）**，列出各阶段已生成/已通过的资产，并给出 `next_stage`。
+  > 关键：**判断已完成看 `state.json` 的资产，不要看实时服务的任务队列**——服务重启后内存队列会清空（显示 0 任务），但已生成的资产仍在 state.json。
+- 据 status 结果**只准备缺失的 / `next_stage` 的任务**：`POST /api/plan {"tasks":[…]}`（备为草稿）。
+  **绝不重推已生成/已通过的资产**（否则会把用户做好的阶段又变回待生成、全部重来）。`需修改` 的项才重做。
+- 用户点「开始生成」只跑**当前阶段**（按阶段门控）；改卡片后「重新生成」、草稿「生成」、失败「重试」都由用户自助。
 - 没有 `review_result.json` 提交闭环；服务**常驻**直到用户点「关闭服务」或你 `--stop`。
 
 ### 如何停止服务（`--daemon` 是常驻的，关闭对话不会自动停——这是有意的，避免生成中被杀）
@@ -129,6 +132,7 @@ license: Complete terms in LICENSE.txt
 | 任务 | 命令 |
 |------|------|
 | **初始化项目(每轮唯一)** | `python scripts/init_project.py --parent /abs/sa_drama --title "..."` → 在总目录下建唯一子目录、打印 `PROJECT:<路径>`（隔离不同对话）。也可 `--project <显式目录>` |
+| **查项目进度(续作前必看)** | `python scripts/status.py --project "$P"` → 各阶段已完成/已通过资产 + `next_stage`（读 state.json，不依赖实时服务）；据此只补缺失/下一阶段 |
 | **启动唯一前端(实时应用)** | `nohup python3 scripts/serve_review.py --project ./drama --port 8765 [--plan …] [--concurrency 4] > ./drama/review/serve.log 2>&1 & disown`（**分离常驻，不要前台、不要 run_in_background**）→ `cat ./drama/review/serve_url.txt` 取真实 URL 放进回复；可深链 `…/#config`/`#characters`/`#clips` |
 | **停止服务** | `python3 scripts/serve_review.py --project ./drama --stop`（或用户在应用点「⏻ 关闭服务」）；启动新项目前先停旧的 |
 | 保存 Key（一般由应用 `#config` 完成） | `python scripts/save_key.py --project ./drama --key "<api_key>"` |
@@ -197,9 +201,11 @@ license: Complete terms in LICENSE.txt
    sleep 1; cat ./drama/review/serve_url.txt
    ```
    把真实链接放进回复，说明：页面已列出「待生成」任务，**点「开始生成」**即按阶段并行跑、卡片显示进度；可逐项「通过/需修改」，不满意改了「重新生成」，失败点「重试」。
-5. **续作阶段2/3**：等用户认可阶段1（或主动说「继续」）后，你**读 `/api/state` 判断阶段**，再写阶段2（`shots`，带 `characters`/`scene`）的任务 `POST /api/plan` 推进；阶段2 认可后再推阶段3（`clips`/`voices`）。队列会按阶段门控，分镜/视频自动拿到前序的人设/场景图作参考。
+5. **续作阶段2/3**：用户认可阶段1（或说「继续」）后，先 `python scripts/status.py --project "$P"` 看 `next_stage` 与已完成资产，
+   只为缺失/下一阶段写任务：阶段2（`shots`，带 `characters`/`scene`）→ `POST /api/plan` 备草稿；阶段2 认可后再推阶段3（`clips` 带 `shots`/`characters`、`voices`）。
+   **不要重推已完成的阶段**。队列按阶段门控，分镜/视频自动拿前序的人设/场景图作参考。
 
-**门禁：** 页面把 `通过` 的资产标 `approved`、`需修改` 标 `draft`（直接写进 `state.json`）。续作前读 `/api/state` 或 `state.json`，只对未通过/缺失的项处理。
+**门禁：** 页面把 `通过` 的资产标 `approved`、`需修改` 标 `draft`（直接写进 `state.json`）。续作前用 `status.py` 看完成情况，只对未通过/缺失的项处理。
 
 **退出：** 阶段1（角色+场景）确认后即可推进阶段2（分镜）；分镜确认后推进阶段3。
 
@@ -237,7 +243,7 @@ license: Complete terms in LICENSE.txt
 ## 修改 / 续集循环
 
 大多数修改用户**直接在应用里完成**：改某卡片的提示词/参考图/模型/设置后「重新生成」即可，无需你介入。
-当用户让你帮忙时，读 `/api/state`（或 `state.json`）：看各项 `review_decision`/`status`，只重做仍 `需修改`/缺失的项。
+当用户让你帮忙时，先 `python scripts/status.py --project "$P"` 看各项 `review`/完成情况，只重做仍 `需修改`/缺失的项。
 
 | 用户诉求 | 回到 | 操作 |
 |----------|------|------|
@@ -251,7 +257,8 @@ license: Complete terms in LICENSE.txt
 
 | 规则 | 说明 |
 |------|------|
-| 唯一前端是实时应用 | 所有配置/生成/审核都在 `serve_review.py`（**`nohup … & disown` 分离常驻**，不要前台、不要 run_in_background；读 `serve_url.txt` 取真实端口给可点击链接）；会话开始即启动、常驻。续作前读 `/api/state` 判断阶段，用 `POST /api/plan` 推进。不要再生成任何静态确认页/配置页 |
+| 唯一前端是实时应用 | 所有配置/生成/审核都在 `serve_review.py`（**`nohup … & disown` 分离常驻**，不要前台、不要 run_in_background；读 `serve_url.txt` 取真实端口给可点击链接）；会话开始即启动、常驻。不要再生成任何静态确认页/配置页 |
+| 续作先查状态 | 续作前必跑 `status.py --project "$P"`（读 state.json，事实来源）确认各阶段已完成的资产；**只准备缺失/下一阶段，绝不重推已生成/已通过的项**（不要看实时服务的空任务队列就重来） |
 | 三阶段顺序 | 必须 人设+场景(阶段1) → 分镜(阶段2) → 视频+语音(阶段3)；分镜/视频任务必带 `characters`(+`scene`)，参考图自动注入。队列已按阶段门控，但**你也应分阶段推进**让用户逐段确认 |
 | 角色出一张三视图合图 | 角色任务**不要带 `views`**（分张 = 3 倍价钱）；默认单张三视图合图即可 |
 | 场景图=空镜 | 场景图只画环境，prompt 不要写人物动作（`gen_image` 对 scene 已强制追加「无人物」约束作兜底）；人物留给分镜 |
