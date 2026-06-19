@@ -1,7 +1,13 @@
 # 本 skill 的脚本主要依赖 Python 标准库（urllib/base64/json…）。
 # 可选依赖：
 #   Pillow  —— 多角色/场景分镜把多张参考图拼成一张「参考拼贴」喂给单参考图的图像 API（gen_image）。
-#             缺失时自动回退为只用第一张参考图。安装：pip install Pillow
-#   ffmpeg  —— 阶段4「成片导出」拼接用。缺时 ensure_env.py / concat_clips 会尝试自动安装。
+#             缺失时自动回退为只用第一张参考图。
+#             安装：pip install Pillow（macOS / Linux / Windows 通用）
+#   ffmpeg  —— 阶段4「成片导出」拼接用。缺时 ensure_env.py / concat_clips 会尝试自动安装（macOS/Linux）。
 #             助手也可：python scripts/ensure_env.py --install --export
+#             Windows 需手动安装并加入 PATH，任选其一：
+#               winget install Gyan.FFmpeg
+#               choco install ffmpeg
+#               scoop install ffmpeg
+#             或从 https://www.gyan.dev/ffmpeg/builds/ 下载，解压后将 bin 目录加入 PATH。
 Pillow>=9
