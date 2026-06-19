@@ -33,8 +33,6 @@ def main():
          "--name", "便利店", "--prompt", "深夜便利店，冷白光", "--mock"])
     run(["gen_image.py", "--project", proj, "--type", "shot", "--id", "shot_01",
          "--prompt", "中景，林夏推门", "--scene", "scene_01", "--mock"])
-    run(["gen_voice.py", "--project", proj, "--character", "char_01",
-         "--text", "你怎么这么晚才来？", "--voice-id", "female_0033_b", "--mock"])
     run(["gen_video.py", "--project", proj, "--id", "clip_01", "--sample",
          "--prompt", "林夏推开便利店门回头一笑",
          "--shots", "shot_01", "--characters", "char_01", "--duration", "5", "--mock"])

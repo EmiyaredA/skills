@@ -3,7 +3,7 @@
 本服务是整套 skill 的**唯一前端**，**活的**：
 - 助手只**准备**任务（plan.json / POST /api/plan，落为「待生成」草稿）并打开网页；**生成由用户在 UI 点「开始生成」触发**。
   生成后用后台 worker 池**并行**跑（默认 4 路），每个资产是占位卡片，带状态（待生成/排队/生成中%/完成/失败）+ 顶部总进度。
-- 生成分三阶段、队列按阶段门控：阶段1 人设+场景 → 阶段2 分镜（用人设/场景图作参考）→ 阶段3 视频+语音。
+- 生成分阶段、队列按阶段门控：阶段1 人设+场景 → 阶段2 分镜（用人设/场景图作参考）→ 阶段3 视频 → 阶段4 导出。
 - 用户在页面上看进度；完成的卡片可立刻改提示词/参考图/模型/设置并「重新生成」，失败的可「重试」；
   点侧边栏「设置」随时改全局配置/Key、即时落盘生效。
 - 服务**常驻**（无「继续/重做」提交闭环）。助手续作下一阶段时：读 /api/state 判断阶段 → POST /api/plan 推进。
@@ -59,20 +59,19 @@ CATEGORIES = [
     {"key": "scenes", "label": "场景", "icon": "photo", "kind": "image"},
     {"key": "shots", "label": "分镜机位", "icon": "clapperboard", "kind": "image"},
     {"key": "clips", "label": "视频片段", "icon": "movie", "kind": "video"},
-    {"key": "voices", "label": "语音配音", "icon": "microphone", "kind": "voice"},
     {"key": "exports", "label": "成片导出", "icon": "film", "kind": "video"},
 ]
-# 生成阶段：阶段1(人设+场景) → 阶段2(分镜，用人设/场景图作参考) → 阶段3(视频/语音)。
+# 生成阶段：阶段1(人设+场景) → 阶段2(分镜，用人设/场景图作参考) → 阶段3(视频) → 阶段4(导出)。
 # 队列按阶段门控：上一阶段全部结束前，不启动下一阶段——保证分镜/视频生成时参考图已存在。
-STAGE_OF = {"characters": 1, "scenes": 1, "shots": 2, "clips": 3, "voices": 3, "exports": 4}
+STAGE_OF = {"characters": 1, "scenes": 1, "shots": 2, "clips": 3, "exports": 4}
 STAGES = [
     {"n": 1, "label": "设定", "cats": ["characters", "scenes"]},
     {"n": 2, "label": "分镜", "cats": ["shots"]},
-    {"n": 3, "label": "成片", "cats": ["clips", "voices"]},
+    {"n": 3, "label": "成片", "cats": ["clips"]},
     {"n": 4, "label": "导出", "cats": ["exports"]},
 ]
 # 用户在卡片上可直接改、并覆盖原始计划参数的字段
-EDITABLE = ("prompt", "model", "ratio", "resolution", "duration", "sample", "voice_id", "text")
+EDITABLE = ("prompt", "model", "ratio", "resolution", "duration", "sample")
 
 
 def _media_url(rel):
@@ -126,8 +125,6 @@ def build_gen_cmd(project, key, spec):
             cmd += ["--ratio", spec["ratio"]]
         if model:
             cmd += ["--model", model]
-        if spec.get("sample"):
-            cmd += ["--sample"]
         if key == "characters":
             if spec.get("gender"):
                 cmd += ["--gender", spec["gender"]]
@@ -171,12 +168,6 @@ def build_gen_cmd(project, key, spec):
             cmd += ["--audio", spec["audio"]]
         if refs:
             cmd += ["--reference", ",".join(refs)]
-        return cmd
-    if key == "voices":
-        cmd = [py, os.path.join(HERE, "gen_voice.py"), "--project", project,
-               "--character", iid, "--text", spec.get("text") or ""]
-        if spec.get("voice_id"):
-            cmd += ["--voice-id", spec["voice_id"]]
         return cmd
     if key == "exports":
         order = spec.get("order")
@@ -417,10 +408,6 @@ class ReviewState:
                  for v, p in tv.items() if p]
         if not media and c.get("image"):
             media = [{"type": "image", "src": _media_url(c["image"]), "name": os.path.basename(c["image"]), "caption": ""}]
-        voice = c.get("voice") or {}
-        if voice.get("sample"):
-            media.append({"type": "audio", "src": _media_url(voice["sample"]),
-                          "name": os.path.basename(voice["sample"]), "caption": "配音"})
         return {"id": c["id"], "title": c.get("name") or c["id"],
                 "meta": (c.get("gender") or ""), "prompt": c.get("prompt", ""),
                 "model": c.get("model", ""), "ratio": c.get("ratio", "16:9"),
@@ -453,19 +440,6 @@ class ReviewState:
                 "media": media, "decision": cl.get("review_decision", "通过"),
                 "note": cl.get("review_note", ""), "status": cl.get("status", "draft")}
 
-    def _voice_item(self, c):
-        voice = c.get("voice") or {}
-        media = []
-        if voice.get("sample"):
-            media = [{"type": "audio", "src": _media_url(voice["sample"]),
-                      "name": os.path.basename(voice["sample"]), "caption": "当前配音"}]
-        return {"id": c["id"], "title": c.get("name") or c["id"],
-                "meta": ("已配音" if voice.get("sample") else "未配音"),
-                "voice_id": voice.get("voice_id", ""), "text": voice.get("sample_text", ""),
-                "media": media, "references": [], "prompt": "",
-                "decision": c.get("voice_decision", "通过"), "note": c.get("voice_note", ""),
-                "status": "done" if voice.get("sample") else "draft"}
-
     def _export_item(self, e):
         src = e.get("local_path") or e.get("video_url")
         media = [{"type": "video", "src": _media_url(src),
@@ -487,8 +461,6 @@ class ReviewState:
             return [self._simple_item(s) for s in state.get("shots", [])]
         if key == "clips":
             return [self._clip_item(c) for c in state.get("clips", [])]
-        if key == "voices":
-            return [self._voice_item(c) for c in state.get("characters", [])]
         if key == "exports":
             return [self._export_item(e) for e in state.get("exports", [])]
         return []
@@ -562,7 +534,7 @@ class Handler(BaseHTTPRequestHandler):
             exts = (".png", ".jpg", ".jpeg", ".webp", ".gif")
             groups = []
             for key, rel, label, _icon in pu.SUBDIRS:
-                if key in ("voices", "review", "output", "docs"):
+                if key in ("review", "output", "docs"):
                     continue
                 d = os.path.join(self.project, rel)
                 if not os.path.isdir(d):
@@ -657,15 +629,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _apply_decision(self, state, key, iid, decision, note):
-        listname = {"voices": "characters"}.get(key, key)
-        it = pu.find(state.get(listname, []), iid)
+        it = pu.find(state.get(key, []), iid)
         if not it:
             return
-        if key == "voices":
-            it["voice_decision"], it["voice_note"] = decision, note
-        else:
-            it["review_decision"], it["review_note"] = decision, note
-            it["status"] = "approved" if decision == "通过" else "draft"
+        it["review_decision"], it["review_note"] = decision, note
+        it["status"] = "approved" if decision == "通过" else "draft"
 
     def _enqueue_edit(self, body):
         """用户在卡片上改了之后点「重新生成」：合并原始 spec + 本次编辑字段，入队。"""
@@ -883,6 +851,7 @@ async function load(){S=await api('/api/state');
   const first=S.categories.find(c=>c.count>0)||S.categories[0];
   CUR=first.key; renderNav(); renderCards();
   applyHash();
+  if(!S.has_key)openSettings();   // 首次打开（还没配 Key）直接弹出配置窗口，引导用户填 Key/设置
   poll();
 }
 function applyHash(){const h=(location.hash||'').slice(1);
@@ -890,7 +859,7 @@ function applyHash(){const h=(location.hash||'').slice(1);
   if(h&&S.categories.some(c=>c.key===h))select(h);}
 window.addEventListener('hashchange',applyHash);
 function catTasks(key){return Object.values(TASK).filter(t=>t.category===key&&(t.status==='running'||t.status==='queued'));}
-const ICONS={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️',microphone:'🎙️',film:'📽️'};
+const ICONS={user:'🧑',photo:'🏙️',clapperboard:'🎬',movie:'🎞️',film:'📽️'};
 function stageOfCat(k){const s=(S.stages||[]).find(x=>x.cats.includes(k));return s?s.n:1;}
 function stageState(stg){  // 'active' 有任务在跑 | 'done' 有成果且无在跑 | 'idle' 空
   const act=Object.values(TASK).some(t=>stg.cats.includes(t.category)&&(t.status==='running'||t.status==='queued'));
@@ -911,7 +880,6 @@ const GUIDE={
   scenes:'阶段1·设定：确认场景图（纯环境、无人物）。角色+场景都确认后，在对话里说「继续」，我来生成分镜。',
   shots:'阶段2·分镜：每张分镜已自动参考阶段1 的人设图+场景图（参考图见下方）。确认机位与构图后说「继续」，我来出视频。',
   clips:'阶段3·成片：建议先出 480p 样片确认，再升成片。可在卡片上调分辨率/时长后「重新生成」。',
-  voices:'阶段3·配音：为角色台词合成语音，确认音色与台词。',
   exports:'阶段4·导出：把已生成的视频片段按剧情时间顺序拼接成一条成片。顺序由 AI 结合你的需求排定，点「合成导出」生成，完成后可下载（需要 ffmpeg）。'};
 function setGuide(key){const g=$('#guide');const has=S.has_key;
   if(!has){g.className='guide warn';g.innerHTML='⚠ 还没配置 API Key，无法生成。请先在 <a onclick="openSettings()">设置 · 填 Key</a>。';return;}
@@ -936,13 +904,10 @@ function setBox(it){const o=S.options;
     <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
     <label>时长(秒)<input type="number" data-f="duration" min="4" max="15" value="${it.duration||5}"></label>
   </div><label class="chk" style="margin-top:9px"><input type="checkbox" data-f="sample"> 用样片(更省积分)重生成</label></div>`;
-  if(CUR==='voices')return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 配音设置</div><div class="sgrid">
-    <label>音色 ID<input type="text" data-f="voice_id" value="${escA(it.voice_id)}" placeholder="如 female_0033_b"></label><label>　</label></div>
-    <div class="lbl">台词文本</div><textarea data-f="text" placeholder="要合成的台词">${esc(it.text)}</textarea></div>`;
   return `<div class="setbox"><div class="lbl" style="margin-top:0">🎛 本图生成设置（覆盖全局）</div><div class="sgrid">
-    <label>模型<select data-f="model">${opt(o.image_models,it.model||S.config.image.model_final)}</select></label>
+    <label>模型<select data-f="model">${opt(o.image_models,it.model||S.config.image.model)}</select></label>
     <label>画幅<select data-f="ratio">${opt(o.ratios,it.ratio||S.config.ratio)}</select></label>
-  </div><label class="chk" style="margin-top:9px"><input type="checkbox" data-f="sample"> 用样片模型(更省)重生成</label></div>`;}
+  </div></div>`;}
 
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function escA(s){return esc(s).replace(/"/g,'&quot;');}   // 属性值转义（额外处理引号）
@@ -958,7 +923,7 @@ function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
   const cls=st==='running'?'running':st==='queued'?'queued':st==='draft'?'draft':st==='failed'?'failed':(it.decision==='需修改'?'rev':'');
   const badge={done:'<span class="badge done">✓ 完成</span>',running:'<span class="badge running">⟳ 生成中</span>',
     queued:'<span class="badge queued">排队中</span>',draft:'<span class="badge queued">✦ 待生成</span>',failed:'<span class="badge failed">✕ 失败</span>'}[st]||'';
-  const isVoice=CUR==='voices', isExport=CUR==='exports';
+  const isExport=CUR==='exports';
   let mediaArea;
   if(st==='running'||st==='queued') mediaArea=`<div class="skeleton">${st==='queued'?'等待前序任务…':isExport?'拼接中…':'渲染中…'}</div>`;
   else if(st==='draft') mediaArea='<div class="skeleton">（待生成 · 确认后点「生成」）</div>';
@@ -966,13 +931,13 @@ function cardHTML(it){const t=TASK[tkey(CUR,it.id)];
     mediaArea=m?`<div class="media">${m}</div>`:'<div class="skeleton">（暂无产出）</div>';}
   const refs=(it.references||[]).map(r=>`<div class="ref" data-path="${r}" data-removed="0"><img src="/media?path=${encodeURIComponent(r)}" onclick="zoom('/media?path=${encodeURIComponent(r)}','ref')"><button class="rx" onclick="removeRef(this)">✕</button></div>`).join('');
   const editBlock=isExport?`<div class="lbl">拼接顺序（${(it.order||[]).length} 段 · 由 AI 按剧情排定）</div><div class="cmsg" style="font-family:inherit;color:var(--mut)">${(it.order||[]).map(esc).join(' → ')||'（未指定，请让 AI 排定）'}</div>`
-    :isVoice?'':`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${esc(it.prompt)}</textarea>
+    :`<div class="lbl">生图提示词（可改）</div><textarea data-f="prompt">${esc(it.prompt)}</textarea>
     <div class="lbl">参考图 · 可删 / 选图 / 上传 / Ctrl+V</div><div class="refs">${refs}<div class="ref-up" onclick="openPicker(this)" title="从当前项目里选图"><span class="ru-ic">📁</span><span class="ru-t">目录</span></div><label class="ref-up" title="点选文件上传；或点本卡片后 Ctrl+V 粘贴剪贴板图片"><span class="ru-ic">＋</span><span class="ru-t">上传</span><input type="file" accept="image/*" multiple hidden onchange="addRefs(this)"></label></div>`;
   const okOn=it.decision!=='需修改';
   const busy=(st==='running'||st==='queued');
-  const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':isVoice?'生成配音':'生成'}</button>`
+  const action=st==='draft'?`<button class="btn regen" onclick="regen(this)">▶ ${isExport?'合成导出':'生成'}</button>`
     :st==='failed'?`<button class="btn regen" onclick="regen(this)">↻ ${isExport?'重试导出':'重试'}</button>`
-    :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':isVoice?'重新配音':'重新生成这一张'}</button>`;
+    :`<button class="btn regen" onclick="regen(this)"${busy?' disabled':''}>↻ ${isExport?'重新导出':'重新生成这一张'}</button>`;
   return `<div class="card ${cls}" data-id="${it.id}">
     <div class="ch"><h3>${esc(it.title)}</h3>${it.meta?`<span class="pill" title="${escA(it.meta)}">${esc(it.meta)}</span>`:''}${badge}</div>
     ${statHTML(t)}
@@ -989,7 +954,7 @@ function taskItem(t){const s=t.spec||{};   // 把"还没落进 state 的在途�
   const order=Array.isArray(s.order)?s.order:(s.order?String(s.order).split(',').map(x=>x.trim()).filter(Boolean):[]);
   return {id:t.item_id,title:t.label||t.item_id,meta:'',prompt:s.prompt||'',
     model:s.model||'',ratio:s.ratio||'',resolution:s.resolution||'480p',duration:s.duration||5,
-    references:s.references||[],voice_id:s.voice_id||'',text:s.text||'',order:order,
+    references:s.references||[],order:order,
     media:[],decision:'通过',note:''};}
 function renderCards(){const items=(S.items[CUR]||[]).slice();
   const ids=new Set(items.map(it=>it.id));
@@ -997,7 +962,7 @@ function renderCards(){const items=(S.items[CUR]||[]).slice();
   Object.values(TASK).forEach(t=>{ if(t.category===CUR && !ids.has(t.item_id)){ items.push(taskItem(t)); ids.add(t.item_id); }});
   if(items.length){$('#cards').innerHTML=items.map(cardHTML).join('');return;}
   const cat=S.categories.find(c=>c.key===CUR)||{};
-  const ico={characters:'🧑',scenes:'🏙️',shots:'🎬',clips:'🎞️',voices:'🎙️',exports:'📽️'}[CUR]||'✨';
+  const ico={characters:'🧑',scenes:'🏙️',shots:'🎬',clips:'🎞️',exports:'📽️'}[CUR]||'✨';
   const hint=S.has_key
     ? '这一阶段还没有内容。按阶段推进：人设/场景 → 分镜 → 视频；在对话里告诉我需求、或让我「继续下一阶段」即可，进度会实时显示在这里。'
     : '还没有内容。先打开 <a onclick="openSettings()">设置 · 填 API Key</a>，填好我就开始生成。';
@@ -1116,18 +1081,14 @@ function renderSettings(){const c=S.config,o=S.options;const sel=(f,list,val)=>`
      <div class="dfield"><label>画幅</label>${sel('ratio',o.ratios,c.ratio)}</div>
      <div class="dfield"><label>视觉风格</label><input type="text" data-c="style" value="${escA(c.style)}" placeholder="如 写实电影感"></div></div>
    <div class="grp"><div class="t">图像</div>
-     <div class="dfield"><label>成片模型</label>${sel('image.model_final',o.image_models,c.image.model_final)}</div>
-     <div class="dfield"><label>样片模型</label>${sel('image.model_sample',o.image_models,c.image.model_sample)}</div></div>
+     <div class="dfield"><label>图像模型</label>${sel('image.model',o.image_models,c.image.model)}</div></div>
    <div class="grp"><div class="t">视频</div>
      <div class="dfield"><label>视频模型</label>${sel('video.model',o.video_models,c.video.model)}</div>
      <div class="dfield"><label>样片分辨率</label>${sel('video.resolution_sample',o.resolutions,c.video.resolution_sample)}</div>
      <div class="dfield"><label>成片分辨率</label>${sel('video.resolution_final',o.resolutions,c.video.resolution_final)}</div>
      <div class="dfield"><label>默认时长(秒)</label><input type="number" data-c="video.duration_default" min="4" max="15" value="${c.video.duration_default}"></div>
      <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.generate_audio" ${c.video.generate_audio?'checked':''}> 生成音轨</label></div>
-     <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.watermark" ${c.video.watermark?'checked':''}> 水印</label></div></div>
-   <div class="grp"><div class="t">语音</div>
-     <div class="dfield"><label>默认音色 ID</label><input type="text" data-c="audio.voice_id" value="${escA(c.audio.voice_id)}" placeholder="如 female_0033_b"></div>
-     <div class="dfield"><label>语速</label><input type="number" data-c="audio.speed" step="0.1" min="0.5" max="2" value="${c.audio.speed}"></div></div>`;
+     <div class="dfield"><label class="chk"><input type="checkbox" data-c="video.watermark" ${c.video.watermark?'checked':''}> 水印</label></div></div>`;
   $('#dbody').querySelectorAll('[data-c]').forEach(e=>e.addEventListener('change',saveSettings));}
 function setDeep(o,path,val){const ks=path.split('.');let cur=o;for(let i=0;i<ks.length-1;i++){cur[ks[i]]=cur[ks[i]]||{};cur=cur[ks[i]];}cur[ks[ks.length-1]]=val;}
 async function saveSettings(){const cfg={};
@@ -1250,7 +1211,7 @@ def main():
     print(f"SERVE:{url}")
     print(f"LINK:[打开实时审核页 ↗]({url})")
     print(f"实时审核服务已启动：{url}（并发 {args.concurrency} 路，按阶段门控；常驻直到用户点「关闭服务」或 --stop）")
-    print(f"  深链：{url}#config（配置/Key）、{url}#characters、{url}#scenes、{url}#shots、{url}#clips、{url}#voices", flush=True)
+    print(f"  深链：{url}#config（配置/Key）、{url}#characters、{url}#scenes、{url}#shots、{url}#clips、{url}#exports", flush=True)
 
     try:
         httpd.serve_forever()

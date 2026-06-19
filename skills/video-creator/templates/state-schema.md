@@ -13,6 +13,7 @@
 | `scenes[]` | 场景 |
 | `shots[]` | 分镜机位 |
 | `clips[]` | 视频片段（样片/成片） |
+| `exports[]` | 成片导出（按序拼接的整片） |
 | `history[]` | 操作日志 |
 
 ## config
@@ -20,13 +21,10 @@
 其中 `style`（视觉风格）会被 `gen_image`/`gen_video` 自动追加到每条提示词，保持全片风格统一：
 ```json
 { "ratio": "9:16", "style": "写实电影感",
-  "image": { "model_final": "senseaudio-image-2.0-260319",
-             "model_sample": "senseaudio-image-2.0-260319", "use_async": false },
+  "image": { "model": "senseaudio-image-2.0-260319", "use_async": false },
   "video": { "model": "doubao-seedance-2-0-260128",
              "resolution_sample": "480p", "resolution_final": "1080p",
-             "duration_default": 5, "generate_audio": true, "watermark": true },
-  "audio": { "tts_model": "senseaudio-tts-1.5-260319", "voice_id": "",
-             "format": "mp3", "speed": 1.0 } }
+             "duration_default": 5, "generate_audio": true, "watermark": true } }
 ```
 API Key **不**存在 config/state 里：走环境变量 `SENSEAUDIO_API_KEY`，或用户在应用 `#config` 填入后写到项目根的 `.sa_key`（不进 git）。
 
@@ -37,8 +35,6 @@ API Key **不**存在 config/state 里：走环境变量 `SENSEAUDIO_API_KEY`，
   "three_view": { "front": "assets/characters/char_01_front.png",
                   "side": "...", "back": "...", "sheet": "(整张三视图，二选一)" },
   "image": "主用图",
-  "voice": { "source": "tts", "voice_id": "female_0033_b",
-             "sample_text": "...", "sample": "assets/voices/char_01.mp3" },
   "status": "draft|approved" }
 ```
 
@@ -66,5 +62,12 @@ API Key **不**存在 config/state 里：走环境变量 `SENSEAUDIO_API_KEY`，
   "task_id": "...", "video_url": "...", "local_path": "output/clip_01_sample.mp4",
   "cost_estimate": 2.5, "status": "draft|generating|done|failed" }
 ```
+
+## exports[]（成片导出）
+```json
+{ "id": "export_01", "title": "完整成片", "order": ["clip_01", "clip_02"],
+  "ratio": "9:16", "local_path": "output/export_01.mp4", "status": "draft|done|failed" }
+```
+`order` 是按播放顺序排列的 clip id 列表（由助手按剧情排定），`concat_clips.py` 据此拼接。
 
 `status`：草稿资产为 `draft`，经用户在审核页确认后置 `approved`。修订时把受影响项设回 `draft`。

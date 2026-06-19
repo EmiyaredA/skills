@@ -15,32 +15,27 @@ import project_utils as pu
 
 # (分类key, 显示名, 阶段)
 CATS = [("characters", "角色三视图", 1), ("scenes", "场景", 1),
-        ("shots", "分镜机位", 2), ("clips", "视频片段", 3), ("voices", "语音配音", 3)]
-STAGE_LABEL = {1: "设定(人设+场景)", 2: "分镜", 3: "成片(视频+语音)"}
+        ("shots", "分镜机位", 2), ("clips", "视频片段", 3), ("exports", "成片导出", 4)]
+STAGE_LABEL = {1: "设定(人设+场景)", 2: "分镜", 3: "成片(视频)", 4: "导出"}
 
 
 def _done(cat, it):
     if cat == "characters":
         return bool(it.get("three_view") or it.get("image"))
-    if cat == "clips":
+    if cat in ("clips", "exports"):
         return bool(it.get("video_url") or it.get("local_path"))
-    if cat == "voices":
-        return bool((it.get("voice") or {}).get("sample"))
     return bool(it.get("image"))
 
 
 def build(project):
     st = pu.load_state(project)
 
-    def items(cat):
-        return st.get("characters", []) if cat == "voices" else st.get(cat, [])
-
     stages = {}
     for cat, label, stg in CATS:
         s = stages.setdefault(stg, {"stage": stg, "label": STAGE_LABEL[stg], "categories": {}})
         lst = []
-        for it in items(cat):
-            review = it.get("voice_decision", "") if cat == "voices" else it.get("review_decision", "")
+        for it in st.get(cat, []):
+            review = it.get("review_decision", "")
             lst.append({"id": it["id"], "name": it.get("name", it["id"]),
                         "done": _done(cat, it), "review": review or "未评"})
         s["categories"][cat] = {"label": label, "items": lst}
@@ -48,7 +43,7 @@ def build(project):
     out = {"title": st.get("title", ""), "project": os.path.abspath(project),
            "has_key": pu.has_key(project), "stages": []}
     next_stage = None
-    for stg in (1, 2, 3):
+    for stg in (1, 2, 3, 4):
         s = stages[stg]
         allit = [x for c in s["categories"].values() for x in c["items"]]
         s["count"] = len(allit)
@@ -57,7 +52,7 @@ def build(project):
         out["stages"].append(s)
         if next_stage is None and (not allit or not s["all_done"] or s["needs_revision"]):
             next_stage = stg
-    out["next_stage"] = next_stage          # None = 三阶段都已完成
+    out["next_stage"] = next_stage          # None = 全部阶段都已完成
     return out
 
 
@@ -80,7 +75,7 @@ def main():
                     print(f"  - [{c['label']}] {x['id']} {x['name']} {mark}{rev}")
         ns = data["next_stage"]
         print("\n下一步：", f"阶段{ns}（{STAGE_LABEL[ns]}）尚未完成，只补这一阶段缺失/需修改的项" if ns
-              else "三阶段均已完成且通过。")
+              else "全部阶段均已完成且通过。")
         print("\n--- JSON ---")
     print(json.dumps(data, ensure_ascii=False, indent=2))
 

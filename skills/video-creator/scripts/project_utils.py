@@ -22,7 +22,6 @@ SUBDIRS = [
     ("characters", "assets/characters", "人设图", "🧑"),   # 角色三视图 / 设定图
     ("scenes",     "assets/scenes",     "场景图", "🏙️"),   # 场景概念图
     ("shots",      "assets/shots",      "分镜图", "🎬"),   # 分镜 / 机位预览
-    ("voices",     "assets/voices",     "语音参考", "🎙️"),  # 配音 / 声音素材
     ("refs",       "assets/refs",       "参考素材", "🖼️"),  # 用户上传 / 抽帧的参考图
     ("output",     "output",            "成片输出", "🎞️"),  # 生成的视频
     ("review",     "review",            "审核页", "📝"),    # 实时应用产物（serve_url.txt / plan.json / serve.pid / serve.log）
@@ -70,10 +69,8 @@ def default_config():
         "ratio": "16:9",
         "style": "",
         "image": {
-            # 样片与成片默认同用 2.0（参考图质量直接影响人设/场景/分镜一致性，不降图像模型）。
-            # 省积分主要靠视频侧的 480p 样片 → 1080p 成片；想更省可在设置里把样片模型改便宜些。
-            "model_final": "senseaudio-image-2.0-260319",
-            "model_sample": "senseaudio-image-2.0-260319",
+            # 图像统一用一个模型（不区分样片/成片）。省积分靠视频侧的 480p 样片 → 1080p 成片。
+            "model": "senseaudio-image-2.0-260319",
             "use_async": False,
         },
         "video": {
@@ -83,12 +80,6 @@ def default_config():
             "duration_default": 5,
             "generate_audio": True,
             "watermark": True,
-        },
-        "audio": {
-            "tts_model": "senseaudio-tts-1.5-260319",
-            "voice_id": "",
-            "format": "mp3",
-            "speed": 1.0,
         },
     }
 

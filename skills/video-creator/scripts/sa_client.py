@@ -28,7 +28,6 @@ IMAGE_PRICE = {
     "sensenova-u1-fast": 0.5,
 }
 VIDEO_PRICE_PER_SEC = {"480p": 0.5, "720p": 1.0, "1080p": 3.1}
-TTS_PRICE_PER_10K_CHARS = 3.5
 
 # 每个图像模型支持的尺寸（取自官方文档）。索引 0 通常为最小/最省。
 IMAGE_SIZES = {
@@ -50,7 +49,6 @@ IMAGE_SIZES = {
 
 DEFAULT_VIDEO_MODEL = "doubao-seedance-2-0-260128"
 DEFAULT_IMAGE_MODEL = "senseaudio-image-2.0-260319"
-DEFAULT_TTS_MODEL = "senseaudio-tts-1.5-260319"
 
 
 class APIError(Exception):
@@ -272,28 +270,6 @@ def video_poll(task_id, poll_interval=8, max_wait=1800, on_progress=None):
         time.sleep(poll_interval)
         waited += poll_interval
     raise APIError(f"视频生成超时（task_id={task_id}）")
-
-
-# ---------- 语音 ----------
-
-def list_voices(voice_type="all"):
-    return _request("POST", "/v1/get_voice", {"voice_type": voice_type})
-
-
-def tts(text, voice_id, model=DEFAULT_TTS_MODEL, fmt="mp3", sample_rate=32000,
-        speed=1.0, vol=1.0, pitch=0):
-    body = {
-        "model": model,
-        "text": text,
-        "stream": False,
-        "voice_setting": {"voice_id": voice_id, "speed": speed, "vol": vol, "pitch": pitch},
-        "audio_setting": {"format": fmt, "sample_rate": sample_rate},
-    }
-    resp = _request("POST", "/v1/t2a_v2", body)
-    audio_hex = (resp.get("data") or {}).get("audio")
-    if not audio_hex:
-        raise APIError(f"t2a_v2 未返回音频：{resp}")
-    return bytes.fromhex(audio_hex)
 
 
 # ---------- 成本预估 ----------

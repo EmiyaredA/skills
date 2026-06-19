@@ -88,24 +88,3 @@
 | 1080p | 3.1 |
 
 > **省积分策略**：先用 480p 出样片确认效果，确认后再用 720p/1080p 出成片。
-
----
-
-## 语音（TTS）
-
-### 合成 `POST /v1/t2a_v2`
-```json
-{ "model": "senseaudio-tts-1.5-260319", "text": "台词", "stream": false,
-  "voice_setting": { "voice_id": "female_0033_b", "speed": 1, "vol": 1, "pitch": 0 },
-  "audio_setting": { "format": "mp3", "sample_rate": 32000 } }
-```
-- 响应：`data.audio` 为 **hex 编码音频**，脚本会 `bytes.fromhex` 后落盘。
-- 格式：`mp3|wav|pcm|flac`；采样率：8000–44100。
-- 价格：约 3.5 元/万字符（1 汉字=2 字符）。
-
-### 列出音色 `POST /v1/get_voice`
-```json
-{ "voice_type": "all" }   // system | voice_clone | voice_generation | all
-```
-- 返回 `system_voice` / `voice_cloning` / `voice_generation` 数组，每项含 `voice_id`、`voice_name`、`description`。
-- 声音克隆（3 秒素材即可）见官方 `guides/voice/custom`。

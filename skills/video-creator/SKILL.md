@@ -12,7 +12,7 @@ license: Complete terms in LICENSE.txt
 
 # AI 短剧创作（SenseAudio）
 
-用 SenseAudio 的图像 / 视频 / 语音 API 创作 AI 短剧。**整套交互只有一个前端：`serve_review.py` 这个本地实时 Web 应用。**
+用 SenseAudio 的图像 / 视频 API 创作 AI 短剧。**整套交互只有一个前端：`serve_review.py` 这个本地实时 Web 应用。**
 会话一开始就把它启动并打开，它就是用户从头到尾用的界面；**对话框只作为指挥/沟通渠道**，所有配置、生成、查看、确认都在 Web 应用里完成。
 
 本 skill 运行在 SoWork/audioclaw 工作区、跑在用户本机。用户**没有终端**，所有脚本由**你（助手）**调用。
@@ -30,7 +30,7 @@ license: Complete terms in LICENSE.txt
 2. **你只「准备」，用户在 UI 触发生成。** 你把提示词/参考图/模型写成 plan 任务（`--plan` 或 `POST /api/plan`），它们只是「待生成」草稿；
    **用户在 UI 点「▶ 开始生成」才真正跑**。别在对话里说"我已生成完"——你做的是备好任务、把 UI 交给用户。
 
-3. **三阶段顺序不可逆。** 人设+场景(阶段1) → 分镜(阶段2) → 视频+语音(阶段3)。队列按阶段门控（上一阶段全部结束前不启动下一阶段），
+3. **阶段顺序不可逆。** 人设+场景(阶段1) → 分镜(阶段2) → 视频成片(阶段3) → 导出(阶段4)。队列按阶段门控（上一阶段全部结束前不启动下一阶段），
    你也应**分阶段推进**让用户逐段确认，不要一次塞满三阶段。
 
 ## ❗启动协议（务必照做，否则页面打不开 / 会话卡死 / 服务被回收）
@@ -53,8 +53,8 @@ license: Complete terms in LICENSE.txt
 
 ## 应用是什么样、怎么用
 
-- **左侧按三阶段分组的侧边栏 + 右侧卡片**：阶段1 角色三视图/场景、阶段2 分镜机位、阶段3 视频片段/语音配音；侧边栏底部「设置（配置/Key）」「⏻ 关闭服务」。
-- **深链直达**：URL hash 路由，需要用户去某处时给带锚点的链接：`…/#config`、`…/#characters`、`…/#scenes`、`…/#shots`、`…/#clips`、`…/#voices`。
+- **左侧按阶段分组的侧边栏 + 右侧卡片**：阶段1 角色三视图/场景、阶段2 分镜机位、阶段3 视频片段、阶段4 成片导出；侧边栏底部「设置（配置/Key）」「⏻ 关闭服务」。
+- **深链直达**：URL hash 路由，需要用户去某处时给带锚点的链接：`…/#config`、`…/#characters`、`…/#scenes`、`…/#shots`、`…/#clips`、`…/#exports`。
 - **生成流程**：你把任务写进 plan → 出现「待生成」草稿卡片 → 用户点「开始生成」→ worker 池**并行**跑（默认 4 路，按阶段门控）→ 每张卡片显示状态（待生成/排队/生成中%/完成/失败）+ 顶部总进度。
 - **用户自助**：完成的卡片可逐项「通过/需修改」+ 意见，或改提示词/参考图/模型/设置后「重新生成」；失败的「重试」（沿用原始参数与自动注入的参考图）；「全部停止」取消排队。
   审核结果（`review_decision`）直接写进 `state.json`，你读它即知用户认可了什么。卡片支持 Ctrl+V 粘贴、「📁 工作目录」选图、上传；每张图可点击放大/下载，✕ 删除参考图。
@@ -63,7 +63,8 @@ license: Complete terms in LICENSE.txt
 
 - **阶段1 设定**：`characters`（人设）+ `scenes`（场景），彼此独立、并行出。
 - **阶段2 分镜**：`shots`，用阶段1 的人设图+场景图作参考（任务带 `characters`/`scene`，服务自动注入对应图）。
-- **阶段3 成片**：`clips`（视频，带 `shots` 分镜帧 + `characters` 角色图）+ `voices`（配音）。
+- **阶段3 成片**：`clips`（视频，带 `shots` 分镜帧 + `characters` 角色图）。
+- **阶段4 导出**：`exports`（把片段按剧情顺序拼成整片，见「阶段 4：导出成片」）。
 
 > **参考图自动解析、不会「忘记」**：生成前服务从已完成的阶段1/2 结果取对应人设图/场景图/分镜图作参考（写进任务、卡片可见）。
 > 你仍应给分镜/视频任务写 `characters`(+`scene`)——它决定身份锚点作用在谁身上（防漂移）；完全没写时才退化为「用全体角色图」兜底。
@@ -90,7 +91,7 @@ license: Complete terms in LICENSE.txt
 
 ```
 阶段0 启动应用 ──→ 阶段1 对齐+生成角色/场景/分镜(应用内看进度审核) ──→ 阶段2 分镜确认 ──→ 阶段3 样片/成片(应用内)
-  建目录·开应用·配Key   ▲  角色三视图·音色·场景·故事·机位                          低配样片→确认→成片
+  建目录·开应用·配Key   ▲  角色三视图·场景·故事·机位                              低配样片→确认→成片
   (模型/参数应用内改)     │  (可反复确认, 接收用户参考素材)                                    │
                        └──────────────────── 修改 / 续集循环 ◄────────────────────────────┘
 ```
@@ -113,19 +114,19 @@ license: Complete terms in LICENSE.txt
 
 ## 阶段 1：对齐需求 + 生成人设/场景
 
-**目标：** 把构想落成可执行规格——登场人物（含三视图与音色）、场景、故事、机位。
+**目标：** 把构想落成可执行规格——登场人物（含三视图）、场景、故事、机位。
 
 1. 用 [templates/brief.md](templates/brief.md) 逐项对齐：题材、画幅、风格、人物、场景、故事、机位。缺口处提问，可多轮反复确认。
 2. **接收用户参考素材**：图像/视频/音频存到 `assets/refs/`。
    **❗参考图必须对应正确角色，不能靠顺序猜**：用户一次给多张人物图时，先逐张看图确认谁是谁，再按角色落盘命名（如 `uploaded_<角色id>.png`）写进对应角色任务；不确定就问。
    最稳：让用户在应用里**对着该角色卡片上传/「📁 工作目录」选图**（落到哪张卡片就是哪个角色）。生成后核对卡片参考图与提示词是否同一人。
 3. **写阶段1 的 `plan.json`**——只放 `characters` + `scenes`：
-   - **角色出一张三视图合图**：不要带 `views`（分张 = 3 倍价钱）；带 `gender` 锁性别、`build` 写身高/体型。（图像样片/成片默认同用 2.0 保证参考图质量；省积分主要靠视频侧 480p→1080p。）
+   - **角色出一张三视图合图**：不要带 `views`（分张 = 3 倍价钱）；带 `gender` 锁性别、`build` 写身高/体型。（图像统一用一个模型，不分样片/成片；省积分靠视频侧 480p→1080p。）
    - **统一画风**：先做一个角色当基准，其余角色 `style_ref:"<基准角色id>"` 出同款画风（详见 [references/prompting-guide.md](references/prompting-guide.md)）。
    - **场景只写环境、无人物**（脚本对 scene 已强制追加「无人物」兜底）。
 4. 按启动协议分离常驻启动应用（`--plan` 把任务备为「待生成」），把真实链接放进回复。
 5. **续作阶段2/3**：用户认可阶段1（或说「继续」）后，先 `status.py` 看 `next_stage`，只为缺失/下一阶段写任务：
-   阶段2（`shots`，带 `characters`/`scene`）→ 认可后再推阶段3（`clips` 带 `shots`/`characters`、`voices`）。**不要重推已完成的阶段。**
+   阶段2（`shots`，带 `characters`/`scene`）→ 认可后再推阶段3（`clips` 带 `shots`/`characters`）→ 阶段4（`exports` 拼接导出）。**不要重推已完成的阶段。**
 
 **门禁：** 页面把 `通过` 的资产标 `approved`、`需修改` 标 `draft`（写进 `state.json`）。续作前用 `status.py` 看完成情况，只处理未通过/缺失项。
 
@@ -188,7 +189,6 @@ curl -s http://127.0.0.1:<端口>/api/plan -d '{"tasks":[{"category":"exports","
 | 角色分张参考图（慎用·3 倍价钱） | `… --type character --id char_01 --prompt "..." --views front,side,back`（仅用户明确要分张时） |
 | 场景图 | `… --type scene --id scene_01 --name 便利店 --prompt "..."` |
 | 分镜机位图 | `… --type shot --id shot_01 --prompt "..." --characters char_01 --scene scene_01` |
-| 列出音色 / 合成台词语音 | `python scripts/gen_voice.py --list`；`… --project "$P" --character char_01 --voice-id female_0033_b --text "..."` |
 | 生成样片（480p 最省） | `python scripts/gen_video.py --project "$P" --id clip_01 --sample --prompt "..." --shots shot_01 --characters char_01 --duration 5` |
 | 生成成片 | `… --id clip_01 --resolution 1080p --prompt "..." --shots shot_01 --characters char_01 --duration 8` |
 | 成本预估 | `python scripts/estimate_cost.py --project "$P"` |
@@ -202,7 +202,7 @@ curl -s http://127.0.0.1:<端口>/api/plan -d '{"tasks":[{"category":"exports","
 └── <标题>_<时间>_<随机>/      # 每轮对话一个项目（init_project --parent 自动建，互相隔离）
     ├── state.json            # 唯一状态源：含 config、各资产；见 templates/state-schema.md
     ├── .sa_key               # API Key（用户在应用 #config 填，不进 git、不展示）
-    ├── assets/               # characters/ scenes/ shots/ voices/ refs/
+    ├── assets/               # characters/ scenes/ shots/ refs/
     ├── output/               # 成片输出
     ├── review/               # 实时应用产物：plan.json、serve_url.txt、serve.pid、serve.log
     └── docs/                 # 剧本 / 说明
@@ -229,11 +229,11 @@ curl -s http://127.0.0.1:<端口>/api/plan -d '{"tasks":[{"category":"exports","
 - **没 Key 引导去 `#config`，绝不 mock**；`--mock` 只属 selftest。
 - **你只准备、用户在 UI 触发生成**；别说"已生成完"。
 - **续作先 `status.py`**（读 state.json），只补缺失/下一阶段，绝不重推已通过项。
-- **三阶段顺序**：人设+场景 → 分镜 → 视频+语音；分镜/视频必带 `characters`(+`scene`)，参考图自动注入。
+- **阶段顺序**：人设+场景 → 分镜 → 视频成片 → 导出；分镜/视频必带 `characters`(+`scene`)，参考图自动注入。
 - **角色单张三视图**，不要 `views`（分张 = 3 倍价钱）；**场景图 = 空镜**（只画环境）。
 - **视频 = 参考分镜图（+角色图）**，不用首/尾帧；用 `shots` 指定参考的分镜。
 - **比例一致**：角色带 `build`，分镜/视频提示词显式写明人物之间、人物与场景/道具的大小比例，跨镜用同一套措辞。
-- **画幅不进提示词**：横纵比由 `ratio` 配置控制（自动映射成输出 `size`），**别在提示词里写「竖屏9:16」「16:9」等**——这里的「比例」只指人物/场景大小关系，不是画幅。
+- **配置信息不进提示词**：画幅（竖屏/9:16/16:9）、分辨率（480p/1080p）、时长（几秒）、样片/成片 等都由**配置或任务字段**控制、用户可随时调，**一律别写进提示词**（如「5秒竖屏短剧样片」是多余的）。提示词只写画面内容/动作/镜头/光线/风格；其中的「比例」只指人物与场景的大小关系，不是画幅。
 - **样片先于成片**（除非用户明确说直接出成片）；**只改受影响项**，不重生成已 `approved` 的资产。
 - **Key 不落盘**：只用环境变量或 `.sa_key`，不写进 state.json / 不提交 git。
 

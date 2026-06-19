@@ -19,7 +19,7 @@
   python gen_image.py --project P --type shot --id shot_01 \
       --prompt "中景，林夏推开玻璃门" --reference assets/characters/char_01_front.png
 
-  --sample 用配置的「样片模型」出草稿（默认与成片同为 2.0，可在应用设置里改便宜模型）。（--mock 仅 selftest 自检用，勿作交付）
+  图像统一用一个模型（不区分样片/成片）。（--mock 仅 selftest 自检用，勿作交付）
 """
 import argparse
 import os
@@ -78,7 +78,6 @@ def main():
     ap.add_argument("--ratio", default=None, help="覆盖项目默认画幅")
     ap.add_argument("--model", default=None)
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--sample", action="store_true", help="用配置的样片模型出草稿（默认与成片同款，可在设置里改便宜模型）")
     ap.add_argument("--async-hd", action="store_true", help="高分辨率用异步接口")
     ap.add_argument("--mock", action="store_true")
     args = ap.parse_args()
@@ -93,7 +92,7 @@ def main():
     cfg = state["config"]
     img_cfg = cfg.get("image", {})
     ratio = args.ratio or cfg["ratio"]
-    model = args.model or (img_cfg.get("model_sample") if args.sample else img_cfg.get("model_final"))
+    model = args.model or img_cfg.get("model") or sa.DEFAULT_IMAGE_MODEL
     use_async = args.async_hd or img_cfg.get("use_async", False)
     style = (cfg.get("style") or "").strip()   # 项目级视觉风格（设置面板里改），追加到每条提示词保持全片统一
 

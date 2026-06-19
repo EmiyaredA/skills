@@ -36,9 +36,9 @@ def main():
     if args.project:
         state = pu.load_state(args.project)
         n_img = len(state.get("characters", [])) + len(state.get("scenes", [])) + len(state.get("shots", []))
-        img_model = state["config"].get("image", {}).get("model_final", "senseaudio-image-2.0-260319")
+        img_model = state["config"].get("image", {}).get("model", "senseaudio-image-2.0-260319")
         img_cost = sa.estimate_image(img_model, n_img)
-        print(f"\n[项目汇总] 图像约 {n_img} 张（成片模型）：~{img_cost:.2f}元")
+        print(f"\n[项目汇总] 图像约 {n_img} 张：~{img_cost:.2f}元")
         total += img_cost
         for cl in state.get("clips", []):
             c = sa.estimate_video(cl.get("resolution", "720p"), cl.get("duration", 5))
