@@ -32,17 +32,18 @@ class GenQueue:
             return {f"{t['category']}::{t['item_id']}" for t in self.tasks
                     if t["status"] in ("queued", "running")}
 
-    def _prepare_spec(self, spec):
+    def _prepare_spec(self, spec, resolve_refs=False):
         spec = pu.normalize_plan_task(dict(spec))
-        try:
-            st = pu.load_state(self.project)
-            pu.resolve_generation_refs(st, spec.get("category"), spec)
-        except FileNotFoundError:
-            pass
+        if resolve_refs:
+            try:
+                st = pu.load_state(self.project)
+                pu.resolve_generation_refs(st, spec.get("category"), spec)
+            except FileNotFoundError:
+                pass
         return spec
 
-    def enqueue(self, spec, start=True):
-        spec = self._prepare_spec(spec)
+    def enqueue(self, spec, start=True, resolve_refs=False):
+        spec = self._prepare_spec(spec, resolve_refs=resolve_refs)
         with self.lock:
             k = self._key(spec)
             self.specs[k] = spec
@@ -357,6 +358,6 @@ class GenQueue:
             if skip:
                 skipped_ids.append({"id": spec["id"], "category": spec["category"], "reason": reason})
                 continue
-            self.enqueue(spec, start=False)
+            self.enqueue(spec, start=False, resolve_refs=True)
             prepared += 1
         return {"prepared": prepared, "skipped": len(skipped_ids), "skipped_ids": skipped_ids}
